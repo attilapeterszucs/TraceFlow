@@ -6,8 +6,10 @@ mod geo;
 
 use std::error::Error;
 use std::thread;
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{unbounded, Receiver};
 use nix::unistd::{setgid, setuid, Uid, User};
+use clap::Parser;
+use pnet::datalink;
 
 fn drop_privileges() -> Result<(), Box<dyn Error>> {
     let current_uid = Uid::current();
@@ -15,17 +17,12 @@ fn drop_privileges() -> Result<(), Box<dyn Error>> {
         let nobody = User::from_name(config::FALLBACK_USER)?
             .ok_or("Could not find fallback user")?;
         
-        // Change group
         setgid(nobody.gid)?;
-        // Change user
         setuid(nobody.uid)?;
         println!("Privileges dropped successfully.");
     }
     Ok(())
 }
-
-use clap::Parser;
-use pnet::datalink;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,7 +52,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let selected_interface = match args.interface {
         Some(name) => name,
         None => {
-            // Auto-detect as a fallback, but inform the user.
             let interfaces = datalink::interfaces();
             let auto = interfaces.into_iter()
                 .find(|e| e.is_up() && !e.is_loopback() && (e.name.starts_with('e') || e.name.starts_with('w')))
@@ -74,21 +70,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Channel for packet events from the sniffer thread to the main app thread
-    let (tx, rx) = unbounded();
-    // Handshake channel to ensure sniffer binds root socket before dropping privileges
+    // Main event channel
+    let (event_tx, event_rx) = unbounded::<app::AppEvent>();
+    // Handshake channel for sniffer
     let (ready_tx, ready_rx) = unbounded::<String>();
 
-    // Start sniffer on a separate thread (needs privileges initially if run as root)
+    // Start sniffer
+    let sniffer_tx = event_tx.clone();
     let thread_iface = selected_interface.clone();
     thread::spawn(move || {
-        network::sniffer::start_sniffing(tx, &thread_iface, ready_tx);
+        let (pkt_tx, pkt_rx) = unbounded::<app::PacketEvent>();
+        let sniffer_event_tx = sniffer_tx.clone();
+        
+        thread::spawn(move || {
+            while let Ok(pkt) = pkt_rx.recv() {
+                let _ = sniffer_event_tx.send(app::AppEvent::Packet(pkt));
+            }
+        });
+
+        network::sniffer::start_sniffing(pkt_tx, &thread_iface, ready_tx);
     });
 
-    // WAIT FOR SNIFFER READY: Handshake ensures the socket is bound as root.
     let detected_iface = ready_rx.recv().unwrap_or_else(|_| String::from("Unknown"));
 
-    // Now safe to drop privileges
+    // Start Traceroute Manager
+    let traceroute_manager = crate::network::traceroute::TracerouteManager::new(event_tx.clone());
+
     let _ = drop_privileges();
 
     let mut app = app::App::new();
@@ -98,21 +105,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let geo_resolver = crate::geo::GeoResolver::new();
 
     // TUI main loop
-    if let Err(e) = run_app_with_rx(app, rx, dns_resolver, geo_resolver) {
+    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager) {
         eprintln!("TUI error: {}", e);
     }
 
     Ok(())
 }
 
-fn run_app_with_rx(
+fn run_app_with_events(
     mut app: app::App, 
-    rx: crossbeam_channel::Receiver<app::PacketEvent>,
+    rx: Receiver<app::AppEvent>,
     dns: crate::geo::resolver::DnsResolver,
     geo: crate::geo::GeoResolver,
+    traceroute: crate::network::traceroute::TracerouteManager,
 ) -> std::io::Result<()> {
-    // Wrapper around ui::run_app that drains the receiver every tick
-    
     use ratatui::{backend::CrosstermBackend, Terminal};
     use crossterm::{
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -133,10 +139,23 @@ fn run_app_with_rx(
     loop {
         // Drain events
         while let Ok(event) = rx.try_recv() {
-            app.add_event(event);
+            match event {
+                app::AppEvent::Packet(pkt) => {
+                    let dest = pkt.dest;
+                    let is_new = !app.nodes.contains_key(&dest);
+                    app.add_event(pkt);
+                    
+                    if is_new && !crate::network::utils::is_local_ip(&dest) {
+                        traceroute.trace(dest);
+                    }
+                }
+                app::AppEvent::TracerouteUpdate(target, path) => {
+                    app.update_path(target, path);
+                }
+            }
         }
 
-        // Perform DNS and Geo lookups for nodes missing them (one at a time to stay responsive)
+        // Perform DNS and Geo lookups
         let unresolved_ips: Vec<_> = app.nodes.values()
             .filter(|n| !n.is_local && (n.hostname.is_none() || n.geo_loc.is_none()))
             .map(|n| n.ip)
