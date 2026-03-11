@@ -68,7 +68,7 @@ brew install libpcap
 The included `install.sh` script compiles the application and applies Linux **Capabilities** to the helper binary. This allows you to run TraceFlow **without sudo**.
 
 ```bash
-git clone https://github.com/your-repo/TraceFlow.git
+git clone https://github.com/attilapeterszucs/TraceFlow.git
 cd TraceFlow
 chmod +x install.sh
 ./install.sh
