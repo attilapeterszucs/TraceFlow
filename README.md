@@ -4,7 +4,7 @@ Created by **Attila Peter Szucs**
 
 TraceFlow is a high-performance, real-time Terminal User Interface (TUI) application designed to visualize and audit your machine's network traffic. Unlike traditional sniffers that present raw data, TraceFlow constructs a dynamic "map" of your connectivity: from the hardware on your local desk to the servers on the other side of the planet.
 
-![TraceFlow Interface](images/placeholder.png)
+![TraceFlow Interface](images/dashboard.png)
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Language](https://img.shields.io/badge/language-Rust-orange.svg)
@@ -53,9 +53,15 @@ TraceFlow operates using a **Multi-Process Privilege-Separated Architecture**:
 
 TraceFlow is written in Rust and requires `libpcap` development headers.
 
-### Prerequisites (Arch Linux)
+### Prerequisites
+#### Arch Linux
 ```bash
 sudo pacman -S libpcap rustup
+```
+
+#### macOS
+```bash
+brew install libpcap
 ```
 
 ### Automatic Secure Install
