@@ -1,68 +1,34 @@
 use ratatui::{
     layout::Rect,
-    widgets::{Block, Borders, Paragraph},
-    style::{Style, Color},
+    widgets::{Block, Borders, canvas::{Canvas, Map, MapResolution, Points}},
+    style::Color,
     Frame,
 };
 use crate::app::App;
 
-// Simple fallback map if we can't get a better one
-const FALLBACK_MAP: &str = r#"
-       _..-'''-._                     _..-'''-._
-     /           \                  /           \
-    |  AMERICAS   |                |   EURASIA   |
-    |             |       _        |             |
-     \           /      /   \       \           /
-      '-..___..-'      |AFRICA|      '-..___..-'
-                        \ _ /
-                               _..-'''-._
-                             /           \
-                            | AUSTRALIA   |
-                             \           /
-                              '-..___..-'
-"#;
-
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut map_buffer = vec![vec![' '; area.width as usize]; area.height as usize];
+    let canvas = Canvas::default()
+        .block(Block::default().title("World Map (Live Traffic)").borders(Borders::ALL))
+        .x_bounds([-180.0, 180.0])
+        .y_bounds([-90.0, 90.0])
+        .paint(|ctx| {
+            // Draw high-resolution world map geometry
+            ctx.draw(&Map {
+                color: Color::Green,
+                resolution: MapResolution::High,
+            });
 
-    // 1. Draw the world map base (simplified for now)
-    let map_lines = FALLBACK_MAP.lines().collect::<Vec<_>>();
-    for (y, line) in map_lines.iter().enumerate() {
-        if y < area.height as usize {
-            for (x, c) in line.chars().enumerate() {
-                if x < area.width as usize {
-                    map_buffer[y][x] = c;
+            // Draw nodes as points on the map
+            for node in app.nodes.values() {
+                if let Some((lat, lon)) = node.geo_loc {
+                    // Coordinate system for Canvas: x is Longitude, y is Latitude
+                    ctx.draw(&Points {
+                        coords: &[(lon, lat)],
+                        color: Color::Cyan,
+                    });
                 }
             }
-        }
-    }
+        });
 
-    // 2. Plot nodes as blips
-    for node in app.nodes.values() {
-        if let Some((lat, lon)) = node.geo_loc {
-            let (x, y) = project_lat_lon(lat, lon, area.width, area.height);
-            if x < area.width as usize && y < area.height as usize {
-                map_buffer[y][x] = 'X';
-            }
-        }
-    }
-
-    let mut map_string = String::new();
-    for row in map_buffer {
-        map_string.push_str(&row.iter().collect::<String>());
-        map_string.push('\n');
-    }
-
-    let map_widget = Paragraph::new(map_string)
-        .block(Block::default().title("World Map (Live Traffic)").borders(Borders::ALL))
-        .style(Style::default().fg(Color::Green));
-
-    f.render_widget(map_widget, area);
-}
-
-fn project_lat_lon(lat: f64, lon: f64, width: u16, height: u16) -> (usize, usize) {
-    // Equirectangular projection
-    let x = ((lon + 180.0) * (width as f64 / 360.0)) as usize;
-    let y = ((90.0 - lat) * (height as f64 / 180.0)) as usize;
-    (x, y)
+    f.render_widget(canvas, area);
 }

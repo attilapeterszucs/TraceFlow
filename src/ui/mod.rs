@@ -10,6 +10,15 @@ use crate::config;
 pub mod map;
 pub mod graph;
 
+pub fn get_protocol_color(proto: &str) -> Color {
+    match proto.to_uppercase().as_str() {
+        "TCP" | "HTTPS" | "HTTP" => Color::Blue,
+        "UDP" | "DNS" => Color::Yellow,
+        "ICMP" | "ICMPV6" => Color::Red,
+        _ => Color::Green, // Local or other discovery
+    }
+}
+
 pub fn draw_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -33,21 +42,24 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     draw_controls(f, left_chunks[2]);
     
     // Sidebar for history/events
+    let sidebar_area = chunks[1];
+    let max_items = sidebar_area.height.saturating_sub(2) as usize; // Subtract borders
+    
     let sidebar_title = format!("Traffic [Iface: {} | Pkts: {}]", app.active_interface, app.total_packets);
-    let items: Vec<ListItem> = app.events.iter().take(20).map(|e| {
+    let items: Vec<ListItem> = app.events.iter().take(max_items).map(|e| {
         let target_name = app.nodes.get(&e.dest)
             .and_then(|n| n.sni.clone().or_else(|| n.hostname.clone()))
             .unwrap_or_else(|| e.dest.to_string());
         
         let content = format!("{:<15} -> {:<20} [{}] {}b", e.source, target_name, e.protocol, e.bytes);
-        ListItem::new(content)
+        let color = get_protocol_color(&e.protocol);
+        ListItem::new(content).style(Style::default().fg(color))
     }).collect();
 
     let history_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(sidebar_title))
-        .style(Style::default().fg(Color::White));
+        .block(Block::default().borders(Borders::ALL).title(sidebar_title));
 
-    f.render_widget(history_list, chunks[1]);
+    f.render_widget(history_list, sidebar_area);
 
     if app.input_mode == InputMode::InterfaceSelection {
         draw_interface_selection(f, app);

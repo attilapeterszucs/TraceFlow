@@ -9,10 +9,13 @@ use crate::app::App;
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let mut graph_text = String::new();
     
+    // Calculate how many nodes we can fit. Each node takes 2 lines.
+    let max_nodes = (area.height.saturating_sub(2) / 2) as usize;
+
     // We render some active nodes in a tree structure
     let nodes: Vec<_> = app.nodes.values()
         .filter(|n| !n.is_local)
-        .take(5)
+        .take(max_nodes)
         .collect();
 
     if nodes.is_empty() {
@@ -51,6 +54,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    // Since Paragraph doesn't support complex per-line styling easily without Spans, 
+    // we'll keep the text-based approach but we could upgrade to Spans for full coloring.
+    // For now, let's at least make the block border match the dominant protocol or a cool Cyan.
+    
     let graph = Paragraph::new(graph_text)
         .block(Block::default().title("Connection Graph (Live Traceroute)").borders(Borders::ALL))
         .style(Style::default().fg(Color::Cyan));
