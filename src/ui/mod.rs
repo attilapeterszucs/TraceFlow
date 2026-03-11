@@ -39,6 +39,14 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         ])
         .split(chunks[0]);
 
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(70), // Live Traffic
+            Constraint::Percentage(30), // Security Alerts
+        ])
+        .split(chunks[1]);
+
     draw_throughput_sparkline(f, left_chunks[0], app);
     
     match app.view_mode {
@@ -49,14 +57,26 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     graph::draw(f, left_chunks[2], app);
     draw_controls(f, left_chunks[3], app);
     
-    // Sidebar for history/events
-    let sidebar_area = chunks[1];
-    let max_items = sidebar_area.height.saturating_sub(2) as usize;
+    draw_traffic_sidebar(f, right_chunks[0], app);
+    draw_alert_sidebar(f, right_chunks[1], app);
+
+    // Overlays
+    if app.input_mode == InputMode::InterfaceSelection {
+        draw_interface_selection(f, app);
+    } else if app.input_mode == InputMode::Inspection {
+        draw_inspection_panel(f, app);
+    } else if app.input_mode == InputMode::Filter {
+        draw_filter_bar(f, app);
+    }
+}
+
+fn draw_traffic_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
+    let max_items = area.height.saturating_sub(2) as usize;
     
-    let sidebar_title = format!("Traffic [If: {} | Fltr: {}]", app.active_interface, app.active_filter);
+    let sidebar_title = format!(" Traffic [If: {} | Fltr: {}] ", app.active_interface, app.active_filter);
     let items: Vec<ListItem> = app.events.iter().take(max_items).map(|e| {
         let target_name = app.nodes.get(&e.dest)
-            .and_then(|n| n.sni.clone().or_else(|| n.hostname.clone()))
+            .and_then(|n| n.sni.clone().or_else(|| n.service_name.clone()).or_else(|| n.hostname.clone()))
             .unwrap_or_else(|| e.dest.to_string());
         
         let mut content = format!("{:<15} -> {:<20} [{}] {}b", e.source, target_name, e.protocol, e.bytes);
@@ -78,16 +98,19 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
 
-    f.render_stateful_widget(history_list, sidebar_area, &mut app.traffic_list_state);
+    f.render_stateful_widget(history_list, area, &mut app.traffic_list_state);
+}
 
-    // Overlays
-    if app.input_mode == InputMode::InterfaceSelection {
-        draw_interface_selection(f, app);
-    } else if app.input_mode == InputMode::Inspection {
-        draw_inspection_panel(f, app);
-    } else if app.input_mode == InputMode::Filter {
-        draw_filter_bar(f, app);
-    }
+fn draw_alert_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = app.alerts.iter().take(area.height as usize).map(|a| {
+        let content = format!("! {}", a.message);
+        ListItem::new(content).style(Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
+    }).collect();
+
+    let alert_list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Security Alerts ").style(Style::default().fg(Color::Red)));
+
+    f.render_widget(alert_list, area);
 }
 
 fn draw_throughput_sparkline(f: &mut Frame, area: Rect, app: &App) {
@@ -173,7 +196,7 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
 
     if let Some(n) = node {
         details.push_str("INFRASTRUCTURE & SYSTEM\n");
-        let name = n.sni.clone().or_else(|| n.hostname.clone()).unwrap_or_else(|| "Unknown".to_string());
+        let name = n.sni.clone().or_else(|| n.service_name.clone()).or_else(|| n.hostname.clone()).unwrap_or_else(|| "Unknown".to_string());
         details.push_str(&format!("Identity:    {}\n", name));
         
         let proc = n.process_name.as_deref().unwrap_or("Unknown Process");

@@ -34,6 +34,7 @@ pub struct PacketEvent {
     pub protocol: String,
     pub bytes: usize,
     pub sni: Option<String>,
+    pub service_name: Option<String>,
     pub raw_payload: Vec<u8>,
     pub direction: TrafficDirection,
     pub is_flagged: bool,
@@ -44,6 +45,7 @@ pub struct Node {
     pub ip: IpAddr,
     pub hostname: Option<String>,
     pub sni: Option<String>,
+    pub service_name: Option<String>,
     pub asn: Option<u32>,
     pub organization: Option<String>,
     pub geo_loc: Option<(f64, f64)>, // Lat, Lon
@@ -80,10 +82,19 @@ pub enum AppView {
     LocalLAN,
 }
 
+#[derive(Debug, Clone)]
+pub struct SecurityAlert {
+    pub _timestamp: Instant,
+    pub message: String,
+    pub _protocol: String,
+    pub _target: IpAddr,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub nodes: HashMap<IpAddr, Node>,
     pub events: VecDeque<PacketEvent>,
+    pub alerts: VecDeque<SecurityAlert>,
     pub active_interface: String,
     pub total_packets: u64,
     pub pulse_frame: u32,
@@ -120,6 +131,7 @@ impl App {
             should_quit: false,
             nodes: HashMap::new(),
             events: VecDeque::with_capacity(config::MAX_HISTORY_EVENTS),
+            alerts: VecDeque::with_capacity(50),
             active_interface: String::from("Detecting..."),
             total_packets: 0,
             pulse_frame: 0,
@@ -192,8 +204,15 @@ impl App {
         }
         self.events.push_front(event.clone());
 
-        self.update_node(event.source, true, event.bytes, event.sni.clone(), event.direction);
-        self.update_node(event.dest, false, event.bytes, event.sni, event.direction);
+        self.update_node(event.source, true, event.bytes, event.sni.clone(), event.direction, event.service_name.clone());
+        self.update_node(event.dest, false, event.bytes, event.sni, event.direction, event.service_name);
+    }
+
+    pub fn add_alert(&mut self, alert: SecurityAlert) {
+        if self.alerts.len() >= 50 {
+            self.alerts.pop_back();
+        }
+        self.alerts.push_front(alert);
     }
 
     pub fn update_path(&mut self, target: IpAddr, path: Vec<Hop>) {
@@ -206,11 +225,12 @@ impl App {
         self.lan_devices.insert(device.ip, device);
     }
 
-    fn update_node(&mut self, ip: IpAddr, is_source: bool, bytes: usize, sni: Option<String>, direction: TrafficDirection) {
+    fn update_node(&mut self, ip: IpAddr, is_source: bool, bytes: usize, sni: Option<String>, direction: TrafficDirection, service: Option<String>) {
         let node = self.nodes.entry(ip).or_insert(Node {
             ip,
             hostname: None,
             sni: sni.clone(),
+            service_name: service.clone(),
             asn: None,
             organization: None,
             geo_loc: None,
@@ -233,6 +253,9 @@ impl App {
         if sni.is_some() {
             node.sni = sni;
         }
+        if service.is_some() {
+            node.service_name = service;
+        }
 
         if is_source {
             node.bytes_sent = node.bytes_sent.saturating_add(bytes);
@@ -248,6 +271,7 @@ impl App {
     pub fn clear_state(&mut self) {
         self.nodes.clear();
         self.events.clear();
+        self.alerts.clear();
         self.total_packets = 0;
         self.traffic_list_state.select(Some(0));
         self.bytes_this_second = 0;

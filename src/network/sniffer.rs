@@ -228,6 +228,7 @@ fn process_transport_layer(
     filter: &Option<TrafficFilter>,
 ) {
     let mut sni = None;
+    let mut service_name = None;
     let mut proto_str = "Other";
     let mut src_port = None;
     let mut dst_port = None;
@@ -240,6 +241,10 @@ fn process_transport_layer(
                 src_port = Some(tcp.get_source());
                 dst_port = Some(tcp.get_destination());
                 let tcp_payload = tcp.payload();
+                
+                service_name = crate::network::services::lookup_service(tcp.get_destination())
+                    .or_else(|| crate::network::services::lookup_service(tcp.get_source()));
+
                 if tcp.get_destination() == 443 || tcp.get_source() == 443 {
                     sni = extract_sni(tcp_payload);
                 }
@@ -251,7 +256,12 @@ fn process_transport_layer(
             if let Some(udp) = pnet::packet::udp::UdpPacket::new(payload) {
                 src_port = Some(udp.get_source());
                 dst_port = Some(udp.get_destination());
-                raw_payload = udp.payload().iter().take(256).cloned().collect();
+                let udp_payload = udp.payload();
+                
+                service_name = crate::network::services::lookup_service(udp.get_destination())
+                    .or_else(|| crate::network::services::lookup_service(udp.get_source()));
+
+                raw_payload = udp_payload.iter().take(256).cloned().collect();
             }
         }
         IpNextHeaderProtocols::Icmp => {
@@ -281,6 +291,7 @@ fn process_transport_layer(
         protocol: proto_str.to_string(),
         bytes: payload.len(),
         sni,
+        service_name,
         raw_payload,
         direction,
         is_flagged: false,

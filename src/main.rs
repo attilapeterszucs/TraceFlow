@@ -110,7 +110,14 @@ fn run_app_with_events(
             match event {
                 app::AppEvent::Packet(mut pkt) => {
                     // Run security heuristics
-                    crate::security::SecurityHeuristics::scan(&mut pkt);
+                    if let Some(msg) = crate::security::SecurityHeuristics::scan(&mut pkt) {
+                        app.add_alert(app::SecurityAlert {
+                            _timestamp: std::time::Instant::now(),
+                            message: msg,
+                            _protocol: pkt.protocol.clone(),
+                            _target: pkt.dest,
+                        });
+                    }
 
                     let dest = pkt.dest;
                     let is_new = !app.nodes.contains_key(&dest);
@@ -122,12 +129,16 @@ fn run_app_with_events(
                     };
 
                     let process_name = local_port.and_then(|p| process_mapper.get_process(&pkt.protocol, p));
+                    let service_name = pkt.service_name.clone();
                     
                     app.add_event(pkt);
                     
                     if let Some(node) = app.nodes.get_mut(&dest) {
                         if node.process_name.is_none() {
                             node.process_name = process_name;
+                        }
+                        if node.service_name.is_none() {
+                            node.service_name = service_name;
                         }
                     }
                     
