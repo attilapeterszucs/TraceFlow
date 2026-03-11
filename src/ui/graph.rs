@@ -4,15 +4,13 @@ use ratatui::{
     style::{Style, Color},
     Frame,
 };
-use crate::app::App;
+use crate::app::{App, TrafficDirection};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let mut graph_text = String::new();
     
-    // Calculate how many nodes we can fit. Each node takes 2 lines.
     let max_nodes = (area.height.saturating_sub(2) / 2) as usize;
 
-    // We render some active nodes in a tree structure
     let nodes: Vec<_> = app.nodes.values()
         .filter(|n| !n.is_local)
         .take(max_nodes)
@@ -26,23 +24,26 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 .or_else(|| node.hostname.clone())
                 .unwrap_or_else(|| node.ip.to_string());
 
-            graph_text.push_str("Your PC");
+            let proc_name = node.process_name.as_deref().unwrap_or("Unknown Process");
+            graph_text.push_str(&format!("Your PC ({})", proc_name));
             
             // Draw path hops
             if node.path.is_empty() {
-                graph_text.push_str(" ---> ");
+                let pulse_char = if node.last_direction == TrafficDirection::Outgoing { ">>>" } else { "<<<" };
+                graph_text.push_str(&format!(" {} ", pulse_char));
                 graph_text.push_str(&target_name);
             } else {
                 for (i, hop) in node.path.iter().enumerate() {
-                    graph_text.push_str(" --- ");
+                    // Use per-node animation frame
+                    let is_active_pulse = (node.animation_frame as u32 % (node.path.len() as u32 + 1)) == i as u32;
                     
-                    // Animation logic: show a pulse '*' moving along the path
-                    let pulse_pos = (app.pulse_frame / 4) % (node.path.len() as u32 + 1);
-                    if i as u32 == pulse_pos {
-                        graph_text.push_str("*");
+                    if is_active_pulse {
+                        let pulse_char = if node.last_direction == TrafficDirection::Outgoing { ">>>" } else { "<<<" };
+                        graph_text.push_str(&format!(" {} ", pulse_char));
+                    } else {
+                        graph_text.push_str(" --- ");
                     }
 
-                    // Display hop name if it matches destination, otherwise brief IP
                     if hop == &node.ip {
                         graph_text.push_str(&target_name);
                     } else {
@@ -54,10 +55,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    // Since Paragraph doesn't support complex per-line styling easily without Spans, 
-    // we'll keep the text-based approach but we could upgrade to Spans for full coloring.
-    // For now, let's at least make the block border match the dominant protocol or a cool Cyan.
-    
     let graph = Paragraph::new(graph_text)
         .block(Block::default().title("Connection Graph (Live Traceroute)").borders(Borders::ALL))
         .style(Style::default().fg(Color::Cyan));

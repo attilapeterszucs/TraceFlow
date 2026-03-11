@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::thread;
 use tls_parser::{parse_tls_plaintext, TlsMessage, TlsMessageHandshake, TlsExtension, SNIType};
 
-use crate::app::PacketEvent;
+use crate::app::{PacketEvent, TrafficDirection};
 
 pub struct SnifferManager {
     command_tx: Sender<SnifferCommand>,
@@ -75,12 +75,12 @@ impl TrafficFilter {
         filter
     }
 
-    fn matches(&self, event: &PacketEvent, src_port: Option<u16>, dst_port: Option<u16>) -> bool {
+    fn matches(&self, event: &PacketEvent) -> bool {
         if let Some(ref proto) = self.protocol {
             if event.protocol != *proto { return false; }
         }
         if let Some(p) = self.port {
-            if src_port != Some(p) && dst_port != Some(p) { return false; }
+            if event.src_port != Some(p) && event.dst_port != Some(p) { return false; }
         }
         if let Some(h) = self.host {
             if event.source != h && event.dest != h { return false; }
@@ -231,6 +231,7 @@ fn process_transport_layer(
     let mut proto_str = "Other";
     let mut src_port = None;
     let mut dst_port = None;
+    let mut raw_payload = Vec::new();
 
     match protocol {
         IpNextHeaderProtocols::Tcp => {
@@ -242,6 +243,7 @@ fn process_transport_layer(
                 if tcp.get_destination() == 443 || tcp.get_source() == 443 {
                     sni = extract_sni(tcp_payload);
                 }
+                raw_payload = tcp_payload.iter().take(256).cloned().collect();
             }
         }
         IpNextHeaderProtocols::Udp => {
@@ -249,23 +251,42 @@ fn process_transport_layer(
             if let Some(udp) = pnet::packet::udp::UdpPacket::new(payload) {
                 src_port = Some(udp.get_source());
                 dst_port = Some(udp.get_destination());
+                raw_payload = udp.payload().iter().take(256).cloned().collect();
             }
         }
-        IpNextHeaderProtocols::Icmp => proto_str = "ICMP",
-        IpNextHeaderProtocols::Icmpv6 => proto_str = "ICMPv6",
-        _ => {}
+        IpNextHeaderProtocols::Icmp => {
+            proto_str = "ICMP";
+            raw_payload = payload.iter().take(256).cloned().collect();
+        }
+        IpNextHeaderProtocols::Icmpv6 => {
+            proto_str = "ICMPv6";
+            raw_payload = payload.iter().take(256).cloned().collect();
+        }
+        _ => {
+            raw_payload = payload.iter().take(256).cloned().collect();
+        }
+    };
+
+    let direction = if crate::network::utils::is_local_ip(&source) {
+        TrafficDirection::Outgoing
+    } else {
+        TrafficDirection::Incoming
     };
 
     let event = PacketEvent {
         source,
         dest,
+        src_port,
+        dst_port,
         protocol: proto_str.to_string(),
         bytes: payload.len(),
         sni,
+        raw_payload,
+        direction,
     };
 
     if let Some(ref f) = filter {
-        if !f.matches(&event, src_port, dst_port) {
+        if !f.matches(&event) {
             return;
         }
     }

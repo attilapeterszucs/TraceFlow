@@ -12,13 +12,23 @@ pub enum AppEvent {
     SwitchInterface(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrafficDirection {
+    Incoming,
+    Outgoing,
+}
+
 #[derive(Debug, Clone)]
 pub struct PacketEvent {
     pub source: IpAddr,
     pub dest: IpAddr,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
     pub protocol: String,
     pub bytes: usize,
     pub sni: Option<String>,
+    pub raw_payload: Vec<u8>,
+    pub direction: TrafficDirection,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +44,9 @@ pub struct Node {
     pub bytes_recv: usize,
     pub last_seen: Instant,
     pub path: Vec<IpAddr>,
+    pub process_name: Option<String>,
+    pub last_direction: TrafficDirection,
+    pub animation_frame: f64,
 }
 
 #[derive(PartialEq)]
@@ -106,6 +119,11 @@ impl App {
         
         if !self.is_paused {
             self.pulse_frame = self.pulse_frame.wrapping_add(1);
+            
+            // Advance per-node animation frames
+            for node in self.nodes.values_mut() {
+                node.animation_frame += 0.25; // Base speed
+            }
         }
         
         // Update throughput every 1 second
@@ -134,8 +152,7 @@ impl App {
         self.total_packets += 1;
         self.bytes_this_second += event.bytes as u64;
         
-        // Logic to determine direction (approximation)
-        if crate::network::utils::is_local_ip(&event.source) {
+        if event.direction == TrafficDirection::Outgoing {
             self.bytes_sent_this_second += event.bytes as u64;
         } else {
             self.bytes_recv_this_second += event.bytes as u64;
@@ -146,12 +163,8 @@ impl App {
         }
         self.events.push_front(event.clone());
 
-        self.update_node(event.source, true, event.bytes, event.sni.clone());
-        self.update_node(event.dest, false, event.bytes, event.sni);
-    }
-
-    pub fn toggle_pause(&mut self) {
-        self.is_paused = !self.is_paused;
+        self.update_node(event.source, true, event.bytes, event.sni.clone(), event.direction);
+        self.update_node(event.dest, false, event.bytes, event.sni, event.direction);
     }
 
     pub fn update_path(&mut self, target: IpAddr, path: Vec<IpAddr>) {
@@ -160,7 +173,11 @@ impl App {
         }
     }
 
-    fn update_node(&mut self, ip: IpAddr, is_source: bool, bytes: usize, sni: Option<String>) {
+    pub fn toggle_pause(&mut self) {
+        self.is_paused = !self.is_paused;
+    }
+
+    fn update_node(&mut self, ip: IpAddr, is_source: bool, bytes: usize, sni: Option<String>, direction: TrafficDirection) {
         let node = self.nodes.entry(ip).or_insert(Node {
             ip,
             hostname: None,
@@ -173,9 +190,18 @@ impl App {
             bytes_recv: 0,
             last_seen: Instant::now(),
             path: Vec::new(),
+            process_name: None,
+            last_direction: direction,
+            animation_frame: 0.0,
         });
 
         node.last_seen = Instant::now();
+        node.last_direction = direction;
+        
+        // Speed up animation based on packet size (max 2.0 boost)
+        let boost = (bytes as f64 / 1500.0).min(2.0);
+        node.animation_frame += boost;
+
         if sni.is_some() {
             node.sni = sni;
         }
@@ -199,7 +225,6 @@ impl App {
         self.bytes_this_second = 0;
     }
 
-    // Navigation methods
     pub fn next_traffic_item(&mut self) {
         let i = match self.traffic_list_state.selected() {
             Some(i) => {

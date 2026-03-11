@@ -140,7 +140,7 @@ fn draw_interface_selection(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(70, 60, f.size());
+    let area = centered_rect(80, 80, f.size());
     f.render_widget(Clear, area);
 
     let selected_idx = app.traffic_list_state.selected().unwrap_or(0);
@@ -152,16 +152,18 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
     let node = app.nodes.get(&event.dest);
     
     let mut details = format!("CONNECTION DETAILS\n");
-    details.push_str(&format!("Source:      {}\n", event.source));
-    details.push_str(&format!("Destination: {}\n", event.dest));
-    details.push_str(&format!("Protocol:    {}\n", event.protocol));
-    details.push_str(&format!("Size:        {} bytes\n\n", event.bytes));
+    details.push_str(&format!("Source:      {:<15} Port: {:?}\n", event.source, event.src_port));
+    details.push_str(&format!("Destination: {:<15} Port: {:?}\n", event.dest, event.dst_port));
+    details.push_str(&format!("Protocol:    {:<15} Size: {} bytes\n\n", event.protocol, event.bytes));
 
     if let Some(n) = node {
-        details.push_str("INFRASTRUCTURE\n");
+        details.push_str("INFRASTRUCTURE & SYSTEM\n");
         let name = n.sni.clone().or_else(|| n.hostname.clone()).unwrap_or_else(|| "Unknown".to_string());
         details.push_str(&format!("Identity:    {}\n", name));
         
+        let proc = n.process_name.as_deref().unwrap_or("Unknown Process");
+        details.push_str(&format!("Local App:   {}\n", proc));
+
         let asn_str = n.asn.map(|a| format!("AS{}", a)).unwrap_or_else(|| "Unknown".to_string());
         let org_str = n.organization.clone().unwrap_or_else(|| "Unknown".to_string());
         details.push_str(&format!("Network:     {} ({})\n", asn_str, org_str));
@@ -180,11 +182,41 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
         }
     }
 
+    details.push_str("\nPAYLOAD HEX DUMP (First 256 bytes)\n");
+    details.push_str(&format_hex_dump(&event.raw_payload));
+
     let p = Paragraph::new(details)
         .block(Block::default().borders(Borders::ALL).title("Deep Node Inspection"))
         .style(Style::default().fg(Color::Cyan));
 
     f.render_widget(p, area);
+}
+
+fn format_hex_dump(data: &[u8]) -> String {
+    let mut result = String::new();
+    for chunk in data.chunks(16) {
+        // Hex part
+        for b in chunk {
+            result.push_str(&format!("{:02X} ", b));
+        }
+        // Padding for short chunks
+        if chunk.len() < 16 {
+            for _ in 0..(16 - chunk.len()) {
+                result.push_str("   ");
+            }
+        }
+        result.push_str(" | ");
+        // ASCII part
+        for &b in chunk {
+            if b >= 32 && b <= 126 {
+                result.push(b as char);
+            } else {
+                result.push('.');
+            }
+        }
+        result.push('\n');
+    }
+    result
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

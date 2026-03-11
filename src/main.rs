@@ -53,6 +53,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Start Traceroute Manager
     let traceroute_manager = crate::network::traceroute::TracerouteManager::new(event_tx.clone());
 
+    // Start Process Mapper
+    let process_mapper = crate::network::process::ProcessMapper::new();
+
     let mut app = app::App::new();
     app.active_interface = detected_iface;
     app.available_interfaces = datalink::interfaces().into_iter()
@@ -64,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let geo_resolver = crate::geo::GeoResolver::new();
 
     // TUI main loop
-    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager, sniffer_manager) {
+    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager, sniffer_manager, process_mapper) {
         eprintln!("TUI error: {}", e);
     }
 
@@ -78,6 +81,7 @@ fn run_app_with_events(
     geo: crate::geo::GeoResolver,
     traceroute: crate::network::traceroute::TracerouteManager,
     sniffer: crate::network::sniffer::SnifferManager,
+    process_mapper: crate::network::process::ProcessMapper,
 ) -> std::io::Result<()> {
     use ratatui::{backend::CrosstermBackend, Terminal};
     use crossterm::{
@@ -103,7 +107,23 @@ fn run_app_with_events(
                 app::AppEvent::Packet(pkt) => {
                     let dest = pkt.dest;
                     let is_new = !app.nodes.contains_key(&dest);
+                    
+                    // Try to find process name for local port
+                    let local_port = if pkt.direction == app::TrafficDirection::Outgoing {
+                        pkt.src_port
+                    } else {
+                        pkt.dst_port
+                    };
+
+                    let process_name = local_port.and_then(|p| process_mapper.get_process(&pkt.protocol, p));
+                    
                     app.add_event(pkt);
+                    
+                    if let Some(node) = app.nodes.get_mut(&dest) {
+                        if node.process_name.is_none() {
+                            node.process_name = process_name;
+                        }
+                    }
                     
                     if is_new && !crate::network::utils::is_local_ip(&dest) {
                         traceroute.trace(dest);
