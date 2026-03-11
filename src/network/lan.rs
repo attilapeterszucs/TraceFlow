@@ -84,6 +84,7 @@ fn scan_subnet(interface: &NetworkInterface, event_tx: &Sender<AppEvent>) {
                                         ip: IpAddr::V4(arp.get_sender_proto_addr()),
                                         mac: mac.clone(),
                                         vendor: crate::network::oui::lookup_vendor(&mac),
+                                        hostname: None,
                                     }));
                                 }
                             }
@@ -96,6 +97,7 @@ fn scan_subnet(interface: &NetworkInterface, event_tx: &Sender<AppEvent>) {
                                         ip: IpAddr::V6(ipv6.get_source()),
                                         mac: mac.clone(),
                                         vendor: crate::network::oui::lookup_vendor(&mac),
+                                        hostname: None,
                                     }));
                                 }
                             }

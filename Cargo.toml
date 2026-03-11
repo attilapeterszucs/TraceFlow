@@ -22,6 +22,9 @@ procfs = "0.16"
 ipnetwork = "0.20"
 pcap = "2.0"
 notify = "6.1"
+memmap2 = "0.9"
+bincode = "1.3"
+sysinfo = "0.30"
 
 [[bin]]
 name = "traceflow"

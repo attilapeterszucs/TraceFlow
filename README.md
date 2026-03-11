@@ -4,9 +4,11 @@ Created by **Attila Peter Szucs**
 
 TraceFlow is a high-performance, real-time Terminal User Interface (TUI) application designed to visualize and audit your machine's network traffic. Unlike traditional sniffers that present raw data, TraceFlow constructs a dynamic "map" of your connectivity: from the hardware on your local desk to the servers on the other side of the planet.
 
+![TraceFlow Interface](images/placeholder.png)
+
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Language](https://img.shields.io/badge/language-Rust-orange.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)
 
 ---
 
@@ -15,23 +17,24 @@ TraceFlow is a high-performance, real-time Terminal User Interface (TUI) applica
 ### 1. Global Visualization
 *   **High-Res Braille Map:** Utilizes Unicode Braille patterns to achieve 8x higher geographic resolution than standard ASCII.
 *   **Real-Time Geo-Mapping:** Automatically projects destination IPs onto a world map using Latitude/Longitude coordinates.
-*   **Directional Flow:** Animated pulses show data moving in real-time (`>>>` for uploads, `<<<` for downloads).
+*   **Directional Flow:** Animated pulses show data moving in real-time (`>>>` for uploads, `<<<` for downloads) with speeds linked to bandwidth intensity.
 
 ### 2. Deep Infrastructure Discovery
-*   **Active Traceroute Engine:** Automatically discovers the full path of every connection (ISP hops, CDNs, backbone nodes).
-*   **Latency Heatmaps:** Color-coded RTT (Round-Trip Time) metrics highlighting network congestion (Green <50ms, Yellow 50-150ms, Red >150ms).
-*   **ASN & Org Identification:** Identifies the legal entity owning the remote server (e.g., "Google LLC", "Cloudflare").
-*   **TLS SNI Sniffing:** Peeks at encrypted handshakes to identify website names (e.g., `discord.com`) even behind generic IPs.
+*   **Active Traceroute Engine:** Automatically discovers the full path of every connection (ISP hops, CDNs, backbone nodes) for IPv4 and IPv6.
+*   **Latency Heatmaps & Jitter:** Color-coded RTT metrics and historical jitter histograms to identify connection stability at a glance.
+*   **ASN & Org Identification:** Identifies the legal entity owning the remote server (e.g. "Google LLC", "Cloudflare").
+*   **Service Name Mapping:** Automatically maps ports to common services (e.g. HTTPS, SSH, DNS).
 
 ### 3. Local System Integration
-*   **Process Mapping:** Scans `/proc` to identify which local application (Firefox, Spotify, etc.) is responsible for a connection.
+*   **Process Mapping:** Identifies which local application (Firefox, Spotify, etc.) is responsible for a connection: supported on both Linux and macOS.
 *   **LAN Topology:** A dedicated "Local Mode" that performs ARP and NDP scanning to map all devices on your current subnet (IPv4/IPv6).
-*   **Hardware Fingerprinting:** Identifies the manufacturer of local devices via MAC OUI lookups (e.g., Apple, Tesla, Hewlett-Packard).
+*   **Hardware Fingerprinting:** Identifies manufacturers via MAC OUI lookups (e.g. Apple, Tesla, HP) and resolves local names via mDNS.
 
-### 4. Security & Auditing
-*   **Heuristic Alert Engine:** Persistent sidebar feed logging risks like cleartext passwords (HTTP/FTP), Tor relays, and VPN tunnels.
-*   **Hex Dump Inspection:** One-key deep dive into the first 256 bytes of any packet for payload analysis.
-*   **BPF Filtering:** Kernel-level filtering to isolate traffic by protocol, port, or host with near-zero CPU overhead.
+### 4. Security & Performance
+*   **Kernel-Level BPF Filtering:** Injects filters directly into the kernel for near-zero CPU overhead even at high-traffic volumes.
+*   **Heuristic Alert Engine:** Persistent sidebar feed logging risks like cleartext credentials, VPN tunnels, or suspicious destination countries.
+*   **High-Speed SHM IPC:** Uses a Shared Memory ring buffer for zero-copy communication between the backend and UI.
+*   **Helper Resilience:** Heartbeat monitoring auto-restarts the backend helper process if it encounters a critical error.
 
 ---
 
@@ -39,11 +42,10 @@ TraceFlow is a high-performance, real-time Terminal User Interface (TUI) applica
 
 TraceFlow operates using a **Multi-Process Privilege-Separated Architecture**:
 
-1.  **The Helper:** A minimal backend process (`traceflow-helper`) captures raw frames using the `pcap` library.
-2.  **Kernel BPF:** Injects Berkeley Packet Filters directly into the Linux kernel for high-performance traffic isolation.
-3.  **The Resolver:** Asynchronous workers perform reverse DNS lookups, GeoIP coordinate fetches, and ASN identification.
-4.  **The Engine:** A stateful manager correlates network sockets with Linux system inodes to find owning PIDs and process names.
-5.  **The TUI:** Built with `Ratatui`, the interface renders at 20FPS with dynamic layouts and Braille dot-density.
+1.  **The Helper:** A minimal backend process (`traceflow-helper`) captures raw frames using the `pcap` library and executes privileged networking tasks.
+2.  **Shared Memory:** Communication between the UI and Helper happens via a zero-copy Shared Memory ring buffer, bypassing standard pipe serialization bottlenecks.
+3.  **The Engine:** A stateful manager correlates network sockets with system processes using the `sysinfo` crate for cross-platform compatibility.
+4.  **The TUI:** Built with `Ratatui`, the interface renders at 20FPS with dynamic layouts and high-density Braille plotting.
 
 ---
 
@@ -76,11 +78,11 @@ chmod +x install.sh
 | **`L`** | Toggle View (World Map vs. Local LAN Topology) |
 | **`P`** | **Pause/Resume** the traffic stream (Freeze for inspection) |
 | **`I`** | Switch Network Interface (Popup Menu) |
-| **`/`** | Open Filter Bar (e.g., type `tcp`, `port 443`, or `host 8.8.8.8`) |
+| **`/`** | Open Filter Bar (e.g. type `tcp`, `port 443`, or `host 8.8.8.8`) |
 | **`C`** | Clear map and traffic history |
 | **`Ctrl+S`** | Save a **PCAP Snapshot** of the last 1000 packets |
 | **`↑ / ↓`** | Navigate through the Traffic Sidebar |
-| **`Enter`** | **Deep Inspect** selected connection (Hex Dump + Stats) |
+| **`Enter`** | **Deep Inspect** selected connection (Jitter, Hex Dump, ASN, Process) |
 | **`Esc`** | Close any active popup or menu |
 
 ---

@@ -4,7 +4,7 @@ use ratatui::{
     style::{Style, Color, Modifier},
     Frame,
 };
-use crate::app::{App, InputMode, AppView};
+use crate::app::{App, InputMode, AppView, AppStatus};
 use crate::config;
 
 pub mod map;
@@ -68,12 +68,26 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     } else if app.input_mode == InputMode::Filter {
         draw_filter_bar(f, app);
     }
+
+    if app.status == AppStatus::HelperCrashed {
+        draw_crash_alert(f);
+    }
+}
+
+fn draw_crash_alert(f: &mut Frame) {
+    let area = centered_rect(50, 20, f.size());
+    f.render_widget(Clear, area);
+    let p = Paragraph::new("\n!!! HELPER PROCESS CRASHED !!!\n\nAttempting to restart backend...")
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red)))
+        .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(p, area);
 }
 
 fn draw_traffic_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     let max_items = area.height.saturating_sub(2) as usize;
     
-    let sidebar_title = format!(" Traffic [If: {} | Fltr: {}] ", app.active_interface, app.active_filter);
+    let sidebar_title = format!(" Traffic [If: {}] ", app.active_interface);
     let items: Vec<ListItem> = app.events.iter().take(max_items).map(|e| {
         let target_name = app.nodes.get(&e.dest)
             .and_then(|n| n.sni.clone().or_else(|| n.service_name.clone()).or_else(|| n.hostname.clone()))
@@ -178,7 +192,7 @@ fn draw_interface_selection(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(80, 80, f.size());
+    let area = centered_rect(70, 70, f.size());
     f.render_widget(Clear, area);
 
     let selected_idx = app.traffic_list_state.selected().unwrap_or(0);
@@ -206,33 +220,39 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
         let org_str = n.organization.clone().unwrap_or_else(|| "Unknown".to_string());
         details.push_str(&format!("Network:     {} ({})\n", asn_str, org_str));
         
-        if let Some((lat, lon)) = n.geo_loc {
-            details.push_str(&format!("Location:    {:.4}, {:.4}\n", lat, lon));
-        }
-        
-        details.push_str("\nTRACEROUTE PATH\n");
-        if n.path.is_empty() {
-            details.push_str("  (No path data available yet)\n");
-        } else {
-            for (i, hop) in n.path.iter().enumerate() {
-                details.push_str(&format!("  {:>2}. {:<15} [{}ms]\n", i + 1, hop.ip, hop.rtt.as_millis()));
-            }
-        }
+        details.push_str("\nLATENCY JITTER (Last 50 packets)\n");
     }
-
-    details.push_str("\nPAYLOAD HEX DUMP (First 256 bytes)\n");
-    details.push_str(&format_hex_dump(&event.raw_payload));
 
     let p = Paragraph::new(details)
         .block(Block::default().borders(Borders::ALL).title("Deep Node Inspection"))
         .style(Style::default().fg(Color::Cyan));
 
     f.render_widget(p, area);
+
+    if let Some(n) = node {
+        if !n.latency_history.is_empty() {
+            // Sparkline area: placed just above the hex dump
+            let spark_area = Rect::new(area.x + 2, area.y + area.height - 16, area.width - 4, 3);
+            let history: Vec<u64> = n.latency_history.iter().cloned().collect();
+            let spark = Sparkline::default()
+                .data(&history)
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(spark, spark_area);
+        }
+    }
+
+    // Hex Dump area: significantly enlarged to fill the bottom half of the popup
+    let payload_area = Rect::new(area.x + 2, area.y + area.height - 12, area.width - 4, 10);
+    let hex_dump = format_hex_dump(&event.raw_payload);
+    let p_payload = Paragraph::new(hex_dump)
+        .block(Block::default().title("Payload Hex Dump (First 128 Bytes)").borders(Borders::ALL));
+    f.render_widget(p_payload, payload_area);
 }
 
 fn format_hex_dump(data: &[u8]) -> String {
     let mut result = String::new();
-    for chunk in data.chunks(16) {
+    // Show up to 128 bytes (8 rows of 16 bytes)
+    for chunk in data.chunks(16).take(8) {
         for b in chunk {
             result.push_str(&format!("{:02X} ", b));
         }

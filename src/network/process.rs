@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::thread;
-use procfs::process::{all_processes, FDTarget};
-use notify::{Watcher, RecursiveMode, Config};
+use sysinfo::System;
 
 pub struct ProcessMapper {
     cache: Arc<Mutex<HashMap<(String, u16), String>>>,
@@ -15,36 +14,25 @@ impl ProcessMapper {
         let cache_clone = Arc::clone(&cache);
 
         thread::spawn(move || {
-            // Initial build
-            if let Ok(new_map) = build_process_map() {
-                let mut lock = cache_clone.lock().unwrap();
-                *lock = new_map;
-            }
+            let mut sys = System::new_all();
+            
+            loop {
+                sys.refresh_all();
+                let mut new_map = HashMap::new();
 
-            // Set up watch on /proc/net
-            let (tx, rx) = std::sync::mpsc::channel();
-            let mut watcher = notify::RecommendedWatcher::new(tx, Config::default()).unwrap();
-            
-            // Note: On Linux, watching /proc directly might be tricky depending on the kernel version.
-            // Some systems don't support inotify on procfs well.
-            // If it fails, we fallback to polling.
-            
-            if watcher.watch(std::path::Path::new("/proc/net"), RecursiveMode::Recursive).is_ok() {
-                for _ in rx {
-                    if let Ok(new_map) = build_process_map() {
-                        let mut lock = cache_clone.lock().unwrap();
-                        *lock = new_map;
+                #[cfg(target_os = "linux")]
+                {
+                    if let Ok(linux_map) = build_linux_process_map() {
+                        new_map = linux_map;
                     }
                 }
-            } else {
-                // Fallback to polling every 2s
-                loop {
-                    if let Ok(new_map) = build_process_map() {
-                        let mut lock = cache_clone.lock().unwrap();
-                        *lock = new_map;
-                    }
-                    thread::sleep(Duration::from_secs(2));
+
+                if !new_map.is_empty() {
+                    let mut lock = cache_clone.lock().unwrap();
+                    *lock = new_map;
                 }
+
+                thread::sleep(Duration::from_secs(5));
             }
         });
 
@@ -57,7 +45,11 @@ impl ProcessMapper {
     }
 }
 
-fn build_process_map() -> Result<HashMap<(String, u16), String>, Box<dyn std::error::Error>> {
+#[cfg(target_os = "linux")]
+fn build_linux_process_map() -> Result<HashMap<(String, u16), String>, Box<dyn std::error::Error>> {
+    use procfs::process::all_processes;
+    use procfs::process::FDTarget;
+
     let mut inode_to_proc = HashMap::new();
 
     for process in all_processes()? {

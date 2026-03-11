@@ -11,13 +11,13 @@ pub enum HelperCommand {
     SwitchInterface(String),
     UpdateFilter(String),
     Trace(IpAddr),
-    SavePcap(String), // Filename
+    SavePcap(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppEvent {
     Packet(PacketEvent),
-    TracerouteUpdate(IpAddr, Vec<Hop>), // Target, Path
+    TracerouteUpdate(IpAddr, Vec<Hop>),
     SwitchInterface(String),
     LanDeviceFound(LanDevice),
 }
@@ -54,6 +54,7 @@ pub struct LanDevice {
     pub ip: IpAddr,
     pub mac: String,
     pub vendor: Option<String>,
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +81,7 @@ pub struct Node {
     pub process_name: Option<String>,
     pub last_direction: TrafficDirection,
     pub animation_frame: f64,
+    pub latency_history: VecDeque<u64>, // RTT in ms
 }
 
 #[derive(PartialEq)]
@@ -96,6 +98,13 @@ pub enum AppView {
     LocalLAN,
 }
 
+#[derive(PartialEq)]
+pub enum AppStatus {
+    Running,
+    HelperCrashed,
+    Initializing,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub nodes: HashMap<IpAddr, Node>,
@@ -106,6 +115,7 @@ pub struct App {
     pub pulse_frame: u32,
     pub input_mode: InputMode,
     pub view_mode: AppView,
+    pub status: AppStatus,
     pub available_interfaces: Vec<String>,
     pub selected_interface_index: usize,
     pub traffic_list_state: ListState,
@@ -143,6 +153,7 @@ impl App {
             pulse_frame: 0,
             input_mode: InputMode::Normal,
             view_mode: AppView::GlobalMap,
+            status: AppStatus::Initializing,
             available_interfaces: Vec::new(),
             selected_interface_index: 0,
             traffic_list_state,
@@ -220,7 +231,14 @@ impl App {
 
     pub fn update_path(&mut self, target: IpAddr, path: Vec<Hop>) {
         if let Some(node) = self.nodes.get_mut(&target) {
-            node.path = path;
+            node.path = path.clone();
+            // Update jitter history with latest RTT
+            if let Some(last_hop) = path.last() {
+                if node.latency_history.len() >= 50 {
+                    node.latency_history.pop_front();
+                }
+                node.latency_history.push_back(last_hop.rtt.as_millis() as u64);
+            }
         }
     }
 
@@ -245,6 +263,7 @@ impl App {
             process_name: None,
             last_direction: direction,
             animation_frame: 0.0,
+            latency_history: VecDeque::with_capacity(50),
         });
 
         node.last_seen = Instant::now();
