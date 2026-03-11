@@ -12,14 +12,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     graph_text.push_str("   |\n");
     
     // We render some active nodes in a tree structure
-    let nodes: Vec<_> = app.nodes.values().take(5).collect();
+    let nodes: Vec<_> = app.nodes.values().filter(|n| !n.is_local).take(5).collect();
     if nodes.is_empty() {
         graph_text.push_str("Listening for connections...\n");
     } else {
         graph_text.push_str("Gateway / ISP\n");
         for (i, node) in nodes.iter().enumerate() {
             let indent = " ".repeat((i + 1) * 3);
-            graph_text.push_str(&format!("{}|--- {}\n", indent, node.ip));
+            let name = node.sni.clone().or_else(|| node.hostname.clone()).unwrap_or_else(|| node.ip.to_string());
+            graph_text.push_str(&format!("{}|--- {}\n", indent, name));
         }
     }
 

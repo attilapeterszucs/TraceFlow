@@ -35,7 +35,12 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     // Sidebar for history/events
     let sidebar_title = format!("Traffic [Iface: {} | Pkts: {}]", app.active_interface, app.total_packets);
     let items: Vec<ListItem> = app.events.iter().take(20).map(|e| {
-        let content = format!("{:<15} -> {:<15} [{}] {}b", e.source, e.dest, e.protocol, e.bytes);
+        // Try to get node name
+        let target_name = app.nodes.get(&e.dest)
+            .and_then(|n| n.sni.clone().or_else(|| n.hostname.clone()))
+            .unwrap_or_else(|| e.dest.to_string());
+        
+        let content = format!("{:<15} -> {:<20} [{}] {}b", e.source, target_name, e.protocol, e.bytes);
         ListItem::new(content)
     }).collect();
 

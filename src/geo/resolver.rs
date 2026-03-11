@@ -1,15 +1,24 @@
-// DNS resolution using tokio and hickory-resolver
 use std::net::IpAddr;
+use hickory_resolver::Resolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
-pub struct DnsResolver {}
+pub struct DnsResolver {
+    resolver: Resolver,
+}
 
 impl DnsResolver {
     pub fn new() -> Self {
-        Self {}
+        let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
+        Self { resolver }
     }
 
-    pub async fn resolve_ip(&self, _ip: IpAddr) -> Option<String> {
-        // Perform reverse DNS lookup
-        None
+    pub fn resolve_ip(&self, ip: IpAddr) -> Option<String> {
+        match self.resolver.reverse_lookup(ip) {
+            Ok(lookup) => {
+                // Get the first PTR record
+                lookup.iter().next().map(|name| name.to_utf8().trim_end_matches('.').to_string())
+            }
+            Err(_) => None,
+        }
     }
 }

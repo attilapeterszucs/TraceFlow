@@ -94,17 +94,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = app::App::new();
     app.active_interface = detected_iface;
 
+    let dns_resolver = crate::geo::resolver::DnsResolver::new();
+    let geo_resolver = crate::geo::GeoResolver::new();
+
     // TUI main loop
-    if let Err(e) = run_app_with_rx(app, rx) {
+    if let Err(e) = run_app_with_rx(app, rx, dns_resolver, geo_resolver) {
         eprintln!("TUI error: {}", e);
     }
 
     Ok(())
 }
 
-fn run_app_with_rx(mut app: app::App, rx: crossbeam_channel::Receiver<app::PacketEvent>) -> std::io::Result<()> {
+fn run_app_with_rx(
+    mut app: app::App, 
+    rx: crossbeam_channel::Receiver<app::PacketEvent>,
+    dns: crate::geo::resolver::DnsResolver,
+    geo: crate::geo::GeoResolver,
+) -> std::io::Result<()> {
     // Wrapper around ui::run_app that drains the receiver every tick
-    // We will just do the same crossterm loop here and call ui::draw
     
     use ratatui::{backend::CrosstermBackend, Terminal};
     use crossterm::{
@@ -127,6 +134,24 @@ fn run_app_with_rx(mut app: app::App, rx: crossbeam_channel::Receiver<app::Packe
         // Drain events
         while let Ok(event) = rx.try_recv() {
             app.add_event(event);
+        }
+
+        // Perform DNS and Geo lookups for nodes missing them (one at a time to stay responsive)
+        let unresolved_ips: Vec<_> = app.nodes.values()
+            .filter(|n| !n.is_local && (n.hostname.is_none() || n.geo_loc.is_none()))
+            .map(|n| n.ip)
+            .take(5)
+            .collect();
+
+        for ip in unresolved_ips {
+            if let Some(node) = app.nodes.get_mut(&ip) {
+                if node.hostname.is_none() {
+                    node.hostname = dns.resolve_ip(ip);
+                }
+                if node.geo_loc.is_none() {
+                    node.geo_loc = geo.lookup(ip);
+                }
+            }
         }
 
         terminal.draw(|f| crate::ui::draw_ui(f, &mut app))?;
