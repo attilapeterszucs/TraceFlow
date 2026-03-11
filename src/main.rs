@@ -119,9 +119,9 @@ fn run_app_with_events(
             }
         }
 
-        // Perform DNS and Geo lookups
+        // Perform DNS, Geo, and ASN lookups
         let unresolved_ips: Vec<_> = app.nodes.values()
-            .filter(|n| !n.is_local && (n.hostname.is_none() || n.geo_loc.is_none()))
+            .filter(|n| !n.is_local && (n.hostname.is_none() || n.geo_loc.is_none() || n.asn.is_none()))
             .map(|n| n.ip)
             .take(5)
             .collect();
@@ -133,6 +133,11 @@ fn run_app_with_events(
                 }
                 if node.geo_loc.is_none() {
                     node.geo_loc = geo.lookup(ip);
+                }
+                if node.asn.is_none() {
+                    let (asn, org) = geo.lookup_asn(ip);
+                    node.asn = asn;
+                    node.organization = org;
                 }
             }
         }
@@ -150,6 +155,9 @@ fn run_app_with_events(
                         KeyCode::Char('q') => app.quit(),
                         KeyCode::Char('i') => app.input_mode = app::InputMode::InterfaceSelection,
                         KeyCode::Char('c') => app.clear_state(),
+                        KeyCode::Down => app.next_traffic_item(),
+                        KeyCode::Up => app.previous_traffic_item(),
+                        KeyCode::Enter => app.input_mode = app::InputMode::Inspection,
                         _ => {}
                     },
                     app::InputMode::InterfaceSelection => match key.code {
@@ -172,6 +180,12 @@ fn run_app_with_events(
                                 app.clear_state();
                                 app.input_mode = app::InputMode::Normal;
                             }
+                        }
+                        _ => {}
+                    },
+                    app::InputMode::Inspection => match key.code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                            app.input_mode = app::InputMode::Normal;
                         }
                         _ => {}
                     }

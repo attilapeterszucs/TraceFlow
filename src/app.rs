@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
+use ratatui::widgets::ListState;
 
 use crate::config;
 
@@ -24,6 +25,8 @@ pub struct Node {
     pub ip: IpAddr,
     pub hostname: Option<String>,
     pub sni: Option<String>,
+    pub asn: Option<u32>,
+    pub organization: Option<String>,
     pub geo_loc: Option<(f64, f64)>, // Lat, Lon
     pub is_local: bool,
     pub bytes_sent: usize,
@@ -36,6 +39,7 @@ pub struct Node {
 pub enum InputMode {
     Normal,
     InterfaceSelection,
+    Inspection,
 }
 
 pub struct App {
@@ -48,10 +52,14 @@ pub struct App {
     pub input_mode: InputMode,
     pub available_interfaces: Vec<String>,
     pub selected_interface_index: usize,
+    pub traffic_list_state: ListState,
 }
 
 impl App {
     pub fn new() -> Self {
+        let mut traffic_list_state = ListState::default();
+        traffic_list_state.select(Some(0));
+        
         Self {
             should_quit: false,
             nodes: HashMap::new(),
@@ -62,6 +70,7 @@ impl App {
             input_mode: InputMode::Normal,
             available_interfaces: Vec::new(),
             selected_interface_index: 0,
+            traffic_list_state,
         }
     }
 
@@ -93,6 +102,8 @@ impl App {
             ip,
             hostname: None,
             sni: sni.clone(),
+            asn: None,
+            organization: None,
             geo_loc: None,
             is_local: crate::network::utils::is_local_ip(&ip),
             bytes_sent: 0,
@@ -121,5 +132,35 @@ impl App {
         self.nodes.clear();
         self.events.clear();
         self.total_packets = 0;
+        self.traffic_list_state.select(Some(0));
+    }
+
+    // Navigation methods
+    pub fn next_traffic_item(&mut self) {
+        let i = match self.traffic_list_state.selected() {
+            Some(i) => {
+                if i >= self.events.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.traffic_list_state.select(Some(i));
+    }
+
+    pub fn previous_traffic_item(&mut self) {
+        let i = match self.traffic_list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.events.len().saturating_sub(1)
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.traffic_list_state.select(Some(i));
     }
 }
