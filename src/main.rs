@@ -155,6 +155,8 @@ fn run_app_with_events(
                         KeyCode::Char('q') => app.quit(),
                         KeyCode::Char('i') => app.input_mode = app::InputMode::InterfaceSelection,
                         KeyCode::Char('c') => app.clear_state(),
+                        KeyCode::Char('p') => app.toggle_pause(),
+                        KeyCode::Char('/') => app.input_mode = app::InputMode::Filter,
                         KeyCode::Down => app.next_traffic_item(),
                         KeyCode::Up => app.previous_traffic_item(),
                         KeyCode::Enter => app.input_mode = app::InputMode::Inspection,
@@ -187,6 +189,20 @@ fn run_app_with_events(
                         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                             app.input_mode = app::InputMode::Normal;
                         }
+                        _ => {}
+                    },
+                    app::InputMode::Filter => match key.code {
+                        KeyCode::Enter => {
+                            app.active_filter = if app.filter_text.is_empty() { String::from("None") } else { app.filter_text.clone() };
+                            sniffer.update_filter(app.filter_text.clone());
+                            app.input_mode = app::InputMode::Normal;
+                        }
+                        KeyCode::Esc => {
+                            app.filter_text.clear();
+                            app.input_mode = app::InputMode::Normal;
+                        }
+                        KeyCode::Char(c) => app.filter_text.push(c),
+                        KeyCode::Backspace => { app.filter_text.pop(); }
                         _ => {}
                     }
                 }

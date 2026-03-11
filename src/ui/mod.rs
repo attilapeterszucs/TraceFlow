@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Layout, Direction, Constraint, Rect},
-    widgets::{Block, Borders, List, ListItem, Clear, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Clear, Paragraph, Sparkline},
     style::{Style, Color, Modifier},
     Frame,
 };
@@ -31,21 +31,23 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3), // Sparkline
             Constraint::Percentage(config::MAP_LAYOUT_PERCENT),
             Constraint::Percentage(config::GRAPH_LAYOUT_PERCENT - 5),
             Constraint::Length(3), // Controls bar
         ])
         .split(chunks[0]);
 
-    map::draw(f, left_chunks[0], app);
-    graph::draw(f, left_chunks[1], app);
-    draw_controls(f, left_chunks[2]);
+    draw_throughput_sparkline(f, left_chunks[0], app);
+    map::draw(f, left_chunks[1], app);
+    graph::draw(f, left_chunks[2], app);
+    draw_controls(f, left_chunks[3], app);
     
     // Sidebar for history/events
     let sidebar_area = chunks[1];
     let max_items = sidebar_area.height.saturating_sub(2) as usize;
     
-    let sidebar_title = format!("Traffic [Iface: {} | Pkts: {}]", app.active_interface, app.total_packets);
+    let sidebar_title = format!("Traffic [If: {} | Fltr: {}]", app.active_interface, app.active_filter);
     let items: Vec<ListItem> = app.events.iter().take(max_items).map(|e| {
         let target_name = app.nodes.get(&e.dest)
             .and_then(|n| n.sni.clone().or_else(|| n.hostname.clone()))
@@ -63,17 +65,56 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(history_list, sidebar_area, &mut app.traffic_list_state);
 
+    // Overlays
     if app.input_mode == InputMode::InterfaceSelection {
         draw_interface_selection(f, app);
     } else if app.input_mode == InputMode::Inspection {
         draw_inspection_panel(f, app);
+    } else if app.input_mode == InputMode::Filter {
+        draw_filter_bar(f, app);
     }
 }
 
-fn draw_controls(f: &mut Frame, area: Rect) {
-    let text = " [Q] Quit | [I] Iface | [C] Clear | [↑/↓] Nav Traffic | [Enter] Inspect ";
+fn draw_throughput_sparkline(f: &mut Frame, area: Rect, app: &App) {
+    let current_kbps = app.throughput_history.back().cloned().unwrap_or(0);
+    let title = format!(
+        " Throughput: {} KB/s | ↓ {} KB/s | ↑ {} KB/s {} ", 
+        current_kbps, 
+        app.current_download_speed, 
+        app.current_upload_speed,
+        if app.is_paused { "[PAUSED]" } else { "" }
+    );
+    
+    let max_data_points = area.width.saturating_sub(2) as usize;
+    let data: Vec<u64> = app.throughput_history.iter()
+        .skip(app.throughput_history.len().saturating_sub(max_data_points))
+        .cloned()
+        .collect();
+        
+    let sparkline = Sparkline::default()
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .data(&data)
+        .style(Style::default().fg(if app.is_paused { Color::Gray } else { Color::Magenta }));
+    f.render_widget(sparkline, area);
+}
+
+fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
+    let text = match app.input_mode {
+        InputMode::Normal => " [Q] Quit | [I] Iface | [/] Filter | [P] Pause | [C] Clear | [↑/↓] Nav | [Enter] Inspect ",
+        InputMode::Filter => " TYPE FILTER (e.g. 'tcp', 'port 443', 'host 1.1.1.1') | [Enter] Apply | [Esc] Cancel ",
+        _ => " [Esc] Back ",
+    };
     let p = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title("Controls"))
+        .style(Style::default().fg(Color::Yellow));
+    f.render_widget(p, area);
+}
+
+fn draw_filter_bar(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 10, f.size());
+    f.render_widget(Clear, area);
+    let p = Paragraph::new(app.filter_text.as_str())
+        .block(Block::default().borders(Borders::ALL).title("Enter BPF Filter (tokens: tcp, udp, icmp, port N, host IP)"))
         .style(Style::default().fg(Color::Yellow));
     f.render_widget(p, area);
 }

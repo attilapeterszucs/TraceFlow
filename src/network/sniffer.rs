@@ -18,6 +18,7 @@ pub struct SnifferManager {
 
 pub enum SnifferCommand {
     SwitchInterface(String),
+    UpdateFilter(String),
 }
 
 impl SnifferManager {
@@ -34,6 +35,58 @@ impl SnifferManager {
     pub fn switch_interface(&self, name: String) {
         let _ = self.command_tx.send(SnifferCommand::SwitchInterface(name));
     }
+
+    pub fn update_filter(&self, filter: String) {
+        let _ = self.command_tx.send(SnifferCommand::UpdateFilter(filter));
+    }
+}
+
+struct TrafficFilter {
+    protocol: Option<String>,
+    port: Option<u16>,
+    host: Option<IpAddr>,
+}
+
+impl TrafficFilter {
+    fn from_str(s: &str) -> Self {
+        let mut filter = Self { protocol: None, port: None, host: None };
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        
+        let mut i = 0;
+        while i < parts.len() {
+            match parts[i].to_lowercase().as_str() {
+                "tcp" | "udp" | "icmp" => filter.protocol = Some(parts[i].to_uppercase()),
+                "port" if i + 1 < parts.len() => {
+                    if let Ok(p) = parts[i+1].parse::<u16>() {
+                        filter.port = Some(p);
+                        i += 1;
+                    }
+                }
+                "host" if i + 1 < parts.len() => {
+                    if let Ok(ip) = parts[i+1].parse::<IpAddr>() {
+                        filter.host = Some(ip);
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        filter
+    }
+
+    fn matches(&self, event: &PacketEvent, src_port: Option<u16>, dst_port: Option<u16>) -> bool {
+        if let Some(ref proto) = self.protocol {
+            if event.protocol != *proto { return false; }
+        }
+        if let Some(p) = self.port {
+            if src_port != Some(p) && dst_port != Some(p) { return false; }
+        }
+        if let Some(h) = self.host {
+            if event.source != h && event.dest != h { return false; }
+        }
+        true
+    }
 }
 
 fn sniffer_worker(
@@ -44,9 +97,9 @@ fn sniffer_worker(
 ) {
     let mut current_channel_rx = None;
     let mut first_run = true;
+    let mut filter: Option<TrafficFilter> = None;
 
     loop {
-        // 1. Check for commands (switch interface) or wait if we don't have a channel
         let timeout = if current_channel_rx.is_none() {
             std::time::Duration::from_millis(100)
         } else {
@@ -57,12 +110,18 @@ fn sniffer_worker(
             match cmd {
                 SnifferCommand::SwitchInterface(name) => {
                     current_interface = name;
-                    current_channel_rx = None; // Reset to force rebuild
+                    current_channel_rx = None;
+                }
+                SnifferCommand::UpdateFilter(f_str) => {
+                    if f_str.is_empty() {
+                        filter = None;
+                    } else {
+                        filter = Some(TrafficFilter::from_str(&f_str));
+                    }
                 }
             }
         }
 
-        // 2. Setup channel if needed
         if current_channel_rx.is_none() {
             let interfaces = datalink::interfaces();
             let interface = interfaces.into_iter()
@@ -95,12 +154,11 @@ fn sniffer_worker(
             }
         }
 
-        // 3. Sniff packet
         if let Some(ref mut rx) = current_channel_rx {
             match rx.next() {
                 Ok(packet) => {
                     if let Some(ethernet) = EthernetPacket::new(packet) {
-                        handle_ethernet_packet(&ethernet, &event_tx);
+                        handle_ethernet_packet(&ethernet, &event_tx, &filter);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -115,23 +173,23 @@ fn sniffer_worker(
     }
 }
 
-fn handle_ethernet_packet(ethernet: &EthernetPacket, tx: &Sender<crate::app::AppEvent>) {
+fn handle_ethernet_packet(ethernet: &EthernetPacket, tx: &Sender<crate::app::AppEvent>, filter: &Option<TrafficFilter>) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
             if let Some(header) = Ipv4Packet::new(ethernet.payload()) {
-                handle_ipv4_packet(&header, tx);
+                handle_ipv4_packet(&header, tx, filter);
             }
         }
         EtherTypes::Ipv6 => {
             if let Some(header) = Ipv6Packet::new(ethernet.payload()) {
-                handle_ipv6_packet(&header, tx);
+                handle_ipv6_packet(&header, tx, filter);
             }
         }
         _ => {}
     }
 }
 
-fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<crate::app::AppEvent>) {
+fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<crate::app::AppEvent>, filter: &Option<TrafficFilter>) {
     let source = IpAddr::V4(header.get_source());
     let dest = IpAddr::V4(header.get_destination());
     let payload = header.payload();
@@ -142,10 +200,11 @@ fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<crate::app::AppEvent>) {
         dest,
         payload,
         tx,
+        filter,
     );
 }
 
-fn handle_ipv6_packet(header: &Ipv6Packet, tx: &Sender<crate::app::AppEvent>) {
+fn handle_ipv6_packet(header: &Ipv6Packet, tx: &Sender<crate::app::AppEvent>, filter: &Option<TrafficFilter>) {
     let source = IpAddr::V6(header.get_source());
     let dest = IpAddr::V6(header.get_destination());
     let payload = header.payload();
@@ -156,6 +215,7 @@ fn handle_ipv6_packet(header: &Ipv6Packet, tx: &Sender<crate::app::AppEvent>) {
         dest,
         payload,
         tx,
+        filter,
     );
 }
 
@@ -165,14 +225,19 @@ fn process_transport_layer(
     dest: IpAddr,
     payload: &[u8],
     tx: &Sender<crate::app::AppEvent>,
+    filter: &Option<TrafficFilter>,
 ) {
     let mut sni = None;
     let mut proto_str = "Other";
+    let mut src_port = None;
+    let mut dst_port = None;
 
     match protocol {
         IpNextHeaderProtocols::Tcp => {
             proto_str = "TCP";
             if let Some(tcp) = TcpPacket::new(payload) {
+                src_port = Some(tcp.get_source());
+                dst_port = Some(tcp.get_destination());
                 let tcp_payload = tcp.payload();
                 if tcp.get_destination() == 443 || tcp.get_source() == 443 {
                     sni = extract_sni(tcp_payload);
@@ -181,6 +246,10 @@ fn process_transport_layer(
         }
         IpNextHeaderProtocols::Udp => {
             proto_str = "UDP";
+            if let Some(udp) = pnet::packet::udp::UdpPacket::new(payload) {
+                src_port = Some(udp.get_source());
+                dst_port = Some(udp.get_destination());
+            }
         }
         IpNextHeaderProtocols::Icmp => proto_str = "ICMP",
         IpNextHeaderProtocols::Icmpv6 => proto_str = "ICMPv6",
@@ -194,6 +263,12 @@ fn process_transport_layer(
         bytes: payload.len(),
         sni,
     };
+
+    if let Some(ref f) = filter {
+        if !f.matches(&event, src_port, dst_port) {
+            return;
+        }
+    }
 
     let _ = tx.send(crate::app::AppEvent::Packet(event));
 }

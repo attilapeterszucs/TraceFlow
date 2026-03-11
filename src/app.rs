@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
+use std::time::Instant;
 use ratatui::widgets::ListState;
 
 use crate::config;
@@ -31,7 +32,7 @@ pub struct Node {
     pub is_local: bool,
     pub bytes_sent: usize,
     pub bytes_recv: usize,
-    pub last_seen: std::time::Instant,
+    pub last_seen: Instant,
     pub path: Vec<IpAddr>,
 }
 
@@ -40,6 +41,7 @@ pub enum InputMode {
     Normal,
     InterfaceSelection,
     Inspection,
+    Filter,
 }
 
 pub struct App {
@@ -53,6 +55,20 @@ pub struct App {
     pub available_interfaces: Vec<String>,
     pub selected_interface_index: usize,
     pub traffic_list_state: ListState,
+    
+    // Throughput monitoring
+    pub throughput_history: VecDeque<u64>,
+    pub bytes_this_second: u64,
+    pub bytes_sent_this_second: u64,
+    pub bytes_recv_this_second: u64,
+    pub last_throughput_update: Instant,
+    pub current_upload_speed: u64,
+    pub current_download_speed: u64,
+    
+    // Filtering
+    pub filter_text: String,
+    pub active_filter: String,
+    pub is_paused: bool,
 }
 
 impl App {
@@ -71,17 +87,60 @@ impl App {
             available_interfaces: Vec::new(),
             selected_interface_index: 0,
             traffic_list_state,
+            throughput_history: VecDeque::with_capacity(500),
+            bytes_this_second: 0,
+            bytes_sent_this_second: 0,
+            bytes_recv_this_second: 0,
+            last_throughput_update: Instant::now(),
+            current_upload_speed: 0,
+            current_download_speed: 0,
+            filter_text: String::new(),
+            active_filter: String::from("None"),
+            is_paused: false,
         }
     }
 
     pub fn on_tick(&mut self) {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         self.nodes.retain(|_, node| now.duration_since(node.last_seen).as_secs() < 300);
-        self.pulse_frame = self.pulse_frame.wrapping_add(1);
+        
+        if !self.is_paused {
+            self.pulse_frame = self.pulse_frame.wrapping_add(1);
+        }
+        
+        // Update throughput every 1 second
+        if now.duration_since(self.last_throughput_update).as_secs() >= 1 {
+            let kb_ps = self.bytes_this_second / 1024;
+            if self.throughput_history.len() >= 500 {
+                self.throughput_history.pop_front();
+            }
+            self.throughput_history.push_back(kb_ps);
+            
+            self.current_upload_speed = self.bytes_sent_this_second / 1024;
+            self.current_download_speed = self.bytes_recv_this_second / 1024;
+            
+            self.bytes_this_second = 0;
+            self.bytes_sent_this_second = 0;
+            self.bytes_recv_this_second = 0;
+            self.last_throughput_update = now;
+        }
     }
 
     pub fn add_event(&mut self, event: PacketEvent) {
+        if self.is_paused {
+            return;
+        }
+
         self.total_packets += 1;
+        self.bytes_this_second += event.bytes as u64;
+        
+        // Logic to determine direction (approximation)
+        if crate::network::utils::is_local_ip(&event.source) {
+            self.bytes_sent_this_second += event.bytes as u64;
+        } else {
+            self.bytes_recv_this_second += event.bytes as u64;
+        }
+        
         if self.events.len() >= config::MAX_HISTORY_EVENTS {
             self.events.pop_back();
         }
@@ -89,6 +148,10 @@ impl App {
 
         self.update_node(event.source, true, event.bytes, event.sni.clone());
         self.update_node(event.dest, false, event.bytes, event.sni);
+    }
+
+    pub fn toggle_pause(&mut self) {
+        self.is_paused = !self.is_paused;
     }
 
     pub fn update_path(&mut self, target: IpAddr, path: Vec<IpAddr>) {
@@ -108,11 +171,11 @@ impl App {
             is_local: crate::network::utils::is_local_ip(&ip),
             bytes_sent: 0,
             bytes_recv: 0,
-            last_seen: std::time::Instant::now(),
+            last_seen: Instant::now(),
             path: Vec::new(),
         });
 
-        node.last_seen = std::time::Instant::now();
+        node.last_seen = Instant::now();
         if sni.is_some() {
             node.sni = sni;
         }
@@ -133,6 +196,7 @@ impl App {
         self.events.clear();
         self.total_packets = 0;
         self.traffic_list_state.select(Some(0));
+        self.bytes_this_second = 0;
     }
 
     // Navigation methods
