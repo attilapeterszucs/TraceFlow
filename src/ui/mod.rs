@@ -4,11 +4,12 @@ use ratatui::{
     style::{Style, Color, Modifier},
     Frame,
 };
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, AppView};
 use crate::config;
 
 pub mod map;
 pub mod graph;
+pub mod lan;
 
 pub fn get_protocol_color(proto: &str) -> Color {
     match proto.to_uppercase().as_str() {
@@ -39,7 +40,12 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         .split(chunks[0]);
 
     draw_throughput_sparkline(f, left_chunks[0], app);
-    map::draw(f, left_chunks[1], app);
+    
+    match app.view_mode {
+        AppView::GlobalMap => map::draw(f, left_chunks[1], app),
+        AppView::LocalLAN => lan::draw(f, left_chunks[1], app),
+    }
+    
     graph::draw(f, left_chunks[2], app);
     draw_controls(f, left_chunks[3], app);
     
@@ -100,7 +106,7 @@ fn draw_throughput_sparkline(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
     let text = match app.input_mode {
-        InputMode::Normal => " [Q] Quit | [I] Iface | [/] Filter | [P] Pause | [C] Clear | [↑/↓] Nav | [Enter] Inspect ",
+        InputMode::Normal => " [Q] Quit | [I] Iface | [L] Map/LAN | [/] Filter | [P] Pause | [C] Clear | [↑/↓] Nav | [Enter] Inspect ",
         InputMode::Filter => " TYPE FILTER (e.g. 'tcp', 'port 443', 'host 1.1.1.1') | [Enter] Apply | [Esc] Cancel ",
         _ => " [Esc] Back ",
     };
@@ -177,7 +183,7 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
             details.push_str("  (No path data available yet)\n");
         } else {
             for (i, hop) in n.path.iter().enumerate() {
-                details.push_str(&format!("  {:>2}. {}\n", i + 1, hop));
+                details.push_str(&format!("  {:>2}. {:<15} [{}ms]\n", i + 1, hop.ip, hop.rtt.as_millis()));
             }
         }
     }
@@ -195,18 +201,15 @@ fn draw_inspection_panel(f: &mut Frame, app: &mut App) {
 fn format_hex_dump(data: &[u8]) -> String {
     let mut result = String::new();
     for chunk in data.chunks(16) {
-        // Hex part
         for b in chunk {
             result.push_str(&format!("{:02X} ", b));
         }
-        // Padding for short chunks
         if chunk.len() < 16 {
             for _ in 0..(16 - chunk.len()) {
                 result.push_str("   ");
             }
         }
         result.push_str(" | ");
-        // ASCII part
         for &b in chunk {
             if b >= 32 && b <= 126 {
                 result.push(b as char);

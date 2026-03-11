@@ -1558,6 +1558,7 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "hickory-resolver",
+ "ipnetwork",
  "libc",
  "maxminddb",
  "nix",

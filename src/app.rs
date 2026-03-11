@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use ratatui::widgets::ListState;
 
 use crate::config;
@@ -8,8 +8,15 @@ use crate::config;
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Packet(PacketEvent),
-    TracerouteUpdate(IpAddr, Vec<IpAddr>), // Target, Path
+    TracerouteUpdate(IpAddr, Vec<Hop>), // Target, Path
     SwitchInterface(String),
+    LanDeviceFound(LanDevice),
+}
+
+#[derive(Debug, Clone)]
+pub struct Hop {
+    pub ip: IpAddr,
+    pub rtt: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,10 +50,18 @@ pub struct Node {
     pub bytes_sent: usize,
     pub bytes_recv: usize,
     pub last_seen: Instant,
-    pub path: Vec<IpAddr>,
+    pub path: Vec<Hop>,
     pub process_name: Option<String>,
     pub last_direction: TrafficDirection,
     pub animation_frame: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LanDevice {
+    pub ip: IpAddr,
+    pub mac: String,
+    pub _hostname: Option<String>,
+    pub _last_seen: Instant,
 }
 
 #[derive(PartialEq)]
@@ -57,6 +72,12 @@ pub enum InputMode {
     Filter,
 }
 
+#[derive(PartialEq)]
+pub enum AppView {
+    GlobalMap,
+    LocalLAN,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub nodes: HashMap<IpAddr, Node>,
@@ -65,6 +86,7 @@ pub struct App {
     pub total_packets: u64,
     pub pulse_frame: u32,
     pub input_mode: InputMode,
+    pub view_mode: AppView,
     pub available_interfaces: Vec<String>,
     pub selected_interface_index: usize,
     pub traffic_list_state: ListState,
@@ -82,6 +104,9 @@ pub struct App {
     pub filter_text: String,
     pub active_filter: String,
     pub is_paused: bool,
+
+    // LAN Devices
+    pub lan_devices: HashMap<IpAddr, LanDevice>,
 }
 
 impl App {
@@ -97,6 +122,7 @@ impl App {
             total_packets: 0,
             pulse_frame: 0,
             input_mode: InputMode::Normal,
+            view_mode: AppView::GlobalMap,
             available_interfaces: Vec::new(),
             selected_interface_index: 0,
             traffic_list_state,
@@ -110,6 +136,7 @@ impl App {
             filter_text: String::new(),
             active_filter: String::from("None"),
             is_paused: false,
+            lan_devices: HashMap::new(),
         }
     }
 
@@ -167,14 +194,14 @@ impl App {
         self.update_node(event.dest, false, event.bytes, event.sni, event.direction);
     }
 
-    pub fn update_path(&mut self, target: IpAddr, path: Vec<IpAddr>) {
+    pub fn update_path(&mut self, target: IpAddr, path: Vec<Hop>) {
         if let Some(node) = self.nodes.get_mut(&target) {
             node.path = path;
         }
     }
 
-    pub fn toggle_pause(&mut self) {
-        self.is_paused = !self.is_paused;
+    pub fn add_lan_device(&mut self, device: LanDevice) {
+        self.lan_devices.insert(device.ip, device);
     }
 
     fn update_node(&mut self, ip: IpAddr, is_source: bool, bytes: usize, sni: Option<String>, direction: TrafficDirection) {
@@ -198,7 +225,6 @@ impl App {
         node.last_seen = Instant::now();
         node.last_direction = direction;
         
-        // Speed up animation based on packet size (max 2.0 boost)
         let boost = (bytes as f64 / 1500.0).min(2.0);
         node.animation_frame += boost;
 
@@ -251,5 +277,16 @@ impl App {
             None => 0,
         };
         self.traffic_list_state.select(Some(i));
+    }
+
+    pub fn toggle_view(&mut self) {
+        self.view_mode = match self.view_mode {
+            AppView::GlobalMap => AppView::LocalLAN,
+            AppView::LocalLAN => AppView::GlobalMap,
+        };
+    }
+
+    pub fn toggle_pause(&mut self) {
+        self.is_paused = !self.is_paused;
     }
 }

@@ -56,6 +56,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Start Process Mapper
     let process_mapper = crate::network::process::ProcessMapper::new();
 
+    // Start LAN Scanner
+    let _lan_scanner = crate::network::lan::LanScanner::new(event_tx.clone());
+
     let mut app = app::App::new();
     app.active_interface = detected_iface;
     app.available_interfaces = datalink::interfaces().into_iter()
@@ -108,7 +111,6 @@ fn run_app_with_events(
                     let dest = pkt.dest;
                     let is_new = !app.nodes.contains_key(&dest);
                     
-                    // Try to find process name for local port
                     let local_port = if pkt.direction == app::TrafficDirection::Outgoing {
                         pkt.src_port
                     } else {
@@ -135,6 +137,9 @@ fn run_app_with_events(
                 app::AppEvent::SwitchInterface(name) => {
                     app.active_interface = name;
                     app.clear_state();
+                }
+                app::AppEvent::LanDeviceFound(device) => {
+                    app.add_lan_device(device);
                 }
             }
         }
@@ -176,6 +181,7 @@ fn run_app_with_events(
                         KeyCode::Char('i') => app.input_mode = app::InputMode::InterfaceSelection,
                         KeyCode::Char('c') => app.clear_state(),
                         KeyCode::Char('p') => app.toggle_pause(),
+                        KeyCode::Char('l') => app.toggle_view(),
                         KeyCode::Char('/') => app.input_mode = app::InputMode::Filter,
                         KeyCode::Down => app.next_traffic_item(),
                         KeyCode::Up => app.previous_traffic_item(),

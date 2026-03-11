@@ -3,11 +3,12 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     style::{Style, Color},
     Frame,
+    text::{Span, Line},
 };
 use crate::app::{App, TrafficDirection};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut graph_text = String::new();
+    let mut lines = Vec::new();
     
     let max_nodes = (area.height.saturating_sub(2) / 2) as usize;
 
@@ -17,7 +18,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     if nodes.is_empty() {
-        graph_text.push_str("Listening for connections...\n");
+        lines.push(Line::from("Listening for connections..."));
     } else {
         for node in nodes {
             let target_name = node.sni.clone()
@@ -25,37 +26,48 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 .unwrap_or_else(|| node.ip.to_string());
 
             let proc_name = node.process_name.as_deref().unwrap_or("Unknown Process");
-            graph_text.push_str(&format!("Your PC ({})", proc_name));
+            let mut line_spans = vec![
+                Span::styled(format!("Your PC ({})", proc_name), Style::default().fg(Color::White)),
+            ];
             
-            // Draw path hops
             if node.path.is_empty() {
                 let pulse_char = if node.last_direction == TrafficDirection::Outgoing { ">>>" } else { "<<<" };
-                graph_text.push_str(&format!(" {} ", pulse_char));
-                graph_text.push_str(&target_name);
+                line_spans.push(Span::raw(format!(" {} ", pulse_char)));
+                line_spans.push(Span::styled(target_name, Style::default().fg(Color::Cyan)));
             } else {
                 for (i, hop) in node.path.iter().enumerate() {
-                    // Use per-node animation frame
                     let is_active_pulse = (node.animation_frame as u32 % (node.path.len() as u32 + 1)) == i as u32;
                     
                     if is_active_pulse {
                         let pulse_char = if node.last_direction == TrafficDirection::Outgoing { ">>>" } else { "<<<" };
-                        graph_text.push_str(&format!(" {} ", pulse_char));
+                        line_spans.push(Span::raw(format!(" {} ", pulse_char)));
                     } else {
-                        graph_text.push_str(" --- ");
+                        line_spans.push(Span::raw(" --- "));
                     }
 
-                    if hop == &node.ip {
-                        graph_text.push_str(&target_name);
+                    let rtt_ms = hop.rtt.as_millis();
+                    let rtt_color = if rtt_ms < 50 {
+                        Color::Green
+                    } else if rtt_ms < 150 {
+                        Color::Yellow
                     } else {
-                        graph_text.push_str(&format!("{}", hop));
+                        Color::Red
+                    };
+
+                    if hop.ip == node.ip {
+                        line_spans.push(Span::styled(target_name.clone(), Style::default().fg(Color::Cyan)));
+                    } else {
+                        line_spans.push(Span::raw(format!("{}", hop.ip)));
                     }
+                    line_spans.push(Span::styled(format!(" [{}ms]", rtt_ms), Style::default().fg(rtt_color)));
                 }
             }
-            graph_text.push_str("\n\n");
+            lines.push(Line::from(line_spans));
+            lines.push(Line::from("")); // Spacer
         }
     }
 
-    let graph = Paragraph::new(graph_text)
+    let graph = Paragraph::new(lines)
         .block(Block::default().title("Connection Graph (Live Traceroute)").borders(Borders::ALL))
         .style(Style::default().fg(Color::Cyan));
 
