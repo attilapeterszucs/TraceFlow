@@ -4,8 +4,17 @@ use std::time::{Instant, Duration};
 use ratatui::widgets::ListState;
 
 use crate::config;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HelperCommand {
+    SwitchInterface(String),
+    UpdateFilter(String),
+    Trace(IpAddr),
+    SavePcap(String), // Filename
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppEvent {
     Packet(PacketEvent),
     TracerouteUpdate(IpAddr, Vec<Hop>), // Target, Path
@@ -13,19 +22,19 @@ pub enum AppEvent {
     LanDeviceFound(LanDevice),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hop {
     pub ip: IpAddr,
     pub rtt: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TrafficDirection {
     Incoming,
     Outgoing,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketEvent {
     pub source: IpAddr,
     pub dest: IpAddr,
@@ -38,6 +47,20 @@ pub struct PacketEvent {
     pub raw_payload: Vec<u8>,
     pub direction: TrafficDirection,
     pub is_flagged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanDevice {
+    pub ip: IpAddr,
+    pub mac: String,
+    pub vendor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityAlert {
+    pub message: String,
+    pub protocol: String,
+    pub target: IpAddr,
 }
 
 #[derive(Debug, Clone)]
@@ -59,15 +82,6 @@ pub struct Node {
     pub animation_frame: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct LanDevice {
-    pub ip: IpAddr,
-    pub mac: String,
-    pub vendor: Option<String>,
-    pub _hostname: Option<String>,
-    pub _last_seen: Instant,
-}
-
 #[derive(PartialEq)]
 pub enum InputMode {
     Normal,
@@ -80,14 +94,6 @@ pub enum InputMode {
 pub enum AppView {
     GlobalMap,
     LocalLAN,
-}
-
-#[derive(Debug, Clone)]
-pub struct SecurityAlert {
-    pub _timestamp: Instant,
-    pub message: String,
-    pub _protocol: String,
-    pub _target: IpAddr,
 }
 
 pub struct App {
@@ -160,14 +166,11 @@ impl App {
         
         if !self.is_paused {
             self.pulse_frame = self.pulse_frame.wrapping_add(1);
-            
-            // Advance per-node animation frames
             for node in self.nodes.values_mut() {
-                node.animation_frame += 0.25; // Base speed
+                node.animation_frame += 0.25;
             }
         }
         
-        // Update throughput every 1 second
         if now.duration_since(self.last_throughput_update).as_secs() >= 1 {
             let kb_ps = self.bytes_this_second / 1024;
             if self.throughput_history.len() >= 500 {

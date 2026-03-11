@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::thread;
 use procfs::process::{all_processes, FDTarget};
+use notify::{Watcher, RecursiveMode, Config};
 
 pub struct ProcessMapper {
-    // Map of (Protocol, LocalPort) -> ProcessName
     cache: Arc<Mutex<HashMap<(String, u16), String>>>,
 }
 
@@ -15,12 +15,36 @@ impl ProcessMapper {
         let cache_clone = Arc::clone(&cache);
 
         thread::spawn(move || {
-            loop {
-                if let Ok(new_map) = build_process_map() {
-                    let mut lock = cache_clone.lock().unwrap();
-                    *lock = new_map;
+            // Initial build
+            if let Ok(new_map) = build_process_map() {
+                let mut lock = cache_clone.lock().unwrap();
+                *lock = new_map;
+            }
+
+            // Set up watch on /proc/net
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut watcher = notify::RecommendedWatcher::new(tx, Config::default()).unwrap();
+            
+            // Note: On Linux, watching /proc directly might be tricky depending on the kernel version.
+            // Some systems don't support inotify on procfs well.
+            // If it fails, we fallback to polling.
+            
+            if watcher.watch(std::path::Path::new("/proc/net"), RecursiveMode::Recursive).is_ok() {
+                for _ in rx {
+                    if let Ok(new_map) = build_process_map() {
+                        let mut lock = cache_clone.lock().unwrap();
+                        *lock = new_map;
+                    }
                 }
-                thread::sleep(Duration::from_secs(2));
+            } else {
+                // Fallback to polling every 2s
+                loop {
+                    if let Ok(new_map) = build_process_map() {
+                        let mut lock = cache_clone.lock().unwrap();
+                        *lock = new_map;
+                    }
+                    thread::sleep(Duration::from_secs(2));
+                }
             }
         });
 
@@ -51,7 +75,6 @@ fn build_process_map() -> Result<HashMap<(String, u16), String>, Box<dyn std::er
 
     let mut result = HashMap::new();
 
-    // Scan TCP
     if let Ok(tcp) = procfs::net::tcp() {
         for entry in tcp {
             if let Some(comm) = inode_to_proc.get(&entry.inode) {
@@ -66,8 +89,6 @@ fn build_process_map() -> Result<HashMap<(String, u16), String>, Box<dyn std::er
             }
         }
     }
-
-    // Scan UDP
     if let Ok(udp) = procfs::net::udp() {
         for entry in udp {
             if let Some(comm) = inode_to_proc.get(&entry.inode) {

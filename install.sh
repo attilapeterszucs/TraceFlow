@@ -2,24 +2,26 @@
 
 # TraceFlow Secure Installation Script
 # This script compiles TraceFlow and sets the necessary Linux capabilities
-# so it can be run without sudo.
+# for the privileged helper binary.
 
 set -e
 
 echo "--- Building TraceFlow (Release) ---"
 cargo build --release
 
-BINARY_PATH="target/release/traceflow"
-DEST_PATH="/usr/local/bin/traceflow"
+BIN_PATH="target/release/traceflow"
+HELPER_PATH="target/release/traceflow-helper"
+DEST_DIR="/usr/local/bin"
 
-echo "--- Installing to $DEST_PATH (requires sudo) ---"
-sudo cp "$BINARY_PATH" "$DEST_PATH"
+echo "--- Installing to $DEST_DIR (requires sudo) ---"
+sudo cp "$BIN_PATH" "$DEST_DIR/traceflow"
+sudo cp "$HELPER_PATH" "$DEST_DIR/traceflow-helper"
 
-echo "--- Setting Linux Capabilities ---"
+echo "--- Setting Linux Capabilities for Helper ---"
 # cap_net_raw: For raw socket sniffing and ICMP traceroute
-# cap_net_admin: For promiscuous mode and ARP scanning
-sudo setcap cap_net_raw,cap_net_admin=eip "$DEST_PATH"
+# cap_net_admin: For promiscuous mode and ARP/NDP scanning
+sudo setcap cap_net_raw,cap_net_admin=eip "$DEST_DIR/traceflow-helper"
 
 echo ""
 echo "Success! You can now run TraceFlow by simply typing: traceflow"
-echo "Note: No sudo is required anymore."
+echo "The UI runs as your normal user, while the helper handles privileged networking."

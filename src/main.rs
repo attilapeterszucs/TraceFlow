@@ -1,14 +1,11 @@
-mod app;
-mod config;
-mod ui;
-mod network;
-mod geo;
-mod security;
-
 use std::error::Error;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+use std::thread;
 use crossbeam_channel::{unbounded, Receiver};
 use clap::Parser;
 use pnet::datalink;
+use traceflow::app::{App, AppEvent, HelperCommand, InputMode, SecurityAlert};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -35,61 +32,80 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let initial_interface = args.interface.unwrap_or_else(|| config::DEFAULT_INTERFACE.to_string());
+    let initial_interface = args.interface.unwrap_or_else(|| String::from("any"));
 
-    // Main event channel
-    let (event_tx, event_rx) = unbounded::<app::AppEvent>();
-    // Handshake channel for sniffer
-    let (ready_tx, ready_rx) = unbounded::<String>();
+    // Main event channel for UI
+    let (event_tx, event_rx) = unbounded::<AppEvent>();
 
-    // Start Sniffer Manager
-    let sniffer_manager = crate::network::sniffer::SnifferManager::new(
-        event_tx.clone(),
-        initial_interface,
-        ready_tx
-    );
+    // Spawn helper process
+    let mut child = Command::new("traceflow-helper")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn traceflow-helper. Make sure it's in your PATH and has capabilities set. Error: {}", e))?;
 
-    let detected_iface = ready_rx.recv().unwrap_or_else(|_| String::from("Unknown"));
+    let mut stdin = child.stdin.take().ok_or("Failed to open helper stdin")?;
+    let stdout = child.stdout.take().ok_or("Failed to open helper stdout")?;
 
-    // Start Traceroute Manager
-    let traceroute_manager = crate::network::traceroute::TracerouteManager::new(event_tx.clone());
+    // Send initial interface command
+    let init_cmd = HelperCommand::SwitchInterface(initial_interface);
+    writeln!(stdin, "{}", serde_json::to_string(&init_cmd)?)?;
 
-    // Start Process Mapper
-    let process_mapper = crate::network::process::ProcessMapper::new();
+    // Thread to read events from helper stdout
+    let event_tx_clone = event_tx.clone();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if let Ok(event) = serde_json::from_str::<AppEvent>(&line) {
+                    let _ = event_tx_clone.send(event);
+                }
+            }
+        }
+    });
 
-    // Start LAN Scanner
-    let _lan_scanner = crate::network::lan::LanScanner::new(event_tx.clone());
+    // We'll wrap stdin in a thread-safe way so UI can send commands
+    let (cmd_tx, cmd_rx) = unbounded::<HelperCommand>();
+    thread::spawn(move || {
+        while let Ok(cmd) = cmd_rx.recv() {
+            if let Ok(json) = serde_json::to_string(&cmd) {
+                let _ = writeln!(stdin, "{}", json);
+                let _ = stdin.flush();
+            }
+        }
+    });
 
-    let mut app = app::App::new();
-    app.active_interface = detected_iface;
+    let mut app = App::new();
     app.available_interfaces = datalink::interfaces().into_iter()
         .filter(|iface| iface.is_up() && !iface.is_loopback())
         .map(|iface| iface.name)
         .collect();
 
-    let dns_resolver = crate::geo::resolver::DnsResolver::new();
-    let geo_resolver = crate::geo::GeoResolver::new();
+    let dns_resolver = traceflow::geo::resolver::DnsResolver::new();
+    let geo_resolver = traceflow::geo::GeoResolver::new();
 
     // TUI main loop
-    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager, sniffer_manager, process_mapper) {
+    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, cmd_tx) {
         eprintln!("TUI error: {}", e);
     }
+
+    // Clean up child
+    let _ = child.kill();
 
     Ok(())
 }
 
 fn run_app_with_events(
-    mut app: app::App, 
-    rx: Receiver<app::AppEvent>,
-    dns: crate::geo::resolver::DnsResolver,
-    geo: crate::geo::GeoResolver,
-    traceroute: crate::network::traceroute::TracerouteManager,
-    sniffer: crate::network::sniffer::SnifferManager,
-    process_mapper: crate::network::process::ProcessMapper,
+    mut app: App, 
+    rx: Receiver<AppEvent>,
+    dns: traceflow::geo::resolver::DnsResolver,
+    geo: traceflow::geo::GeoResolver,
+    cmd_tx: crossbeam_channel::Sender<HelperCommand>,
 ) -> std::io::Result<()> {
     use ratatui::{backend::CrosstermBackend, Terminal};
     use crossterm::{
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
@@ -101,59 +117,42 @@ fn run_app_with_events(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let tick_rate = Duration::from_millis(config::TICK_RATE_MS);
+    let tick_rate = Duration::from_millis(traceflow::config::TICK_RATE_MS);
     let mut last_tick = Instant::now();
 
     loop {
         // Drain events
         while let Ok(event) = rx.try_recv() {
             match event {
-                app::AppEvent::Packet(mut pkt) => {
-                    // Run security heuristics
-                    if let Some(msg) = crate::security::SecurityHeuristics::scan(&mut pkt) {
-                        app.add_alert(app::SecurityAlert {
-                            _timestamp: std::time::Instant::now(),
+                AppEvent::Packet(mut pkt) => {
+                    if let Some(msg) = traceflow::security::SecurityHeuristics::scan(&mut pkt) {
+                        app.add_alert(SecurityAlert {
                             message: msg,
-                            _protocol: pkt.protocol.clone(),
-                            _target: pkt.dest,
+                            protocol: pkt.protocol.clone(),
+                            target: pkt.dest,
                         });
                     }
 
                     let dest = pkt.dest;
                     let is_new = !app.nodes.contains_key(&dest);
                     
-                    let local_port = if pkt.direction == app::TrafficDirection::Outgoing {
-                        pkt.src_port
-                    } else {
-                        pkt.dst_port
-                    };
-
-                    let process_name = local_port.and_then(|p| process_mapper.get_process(&pkt.protocol, p));
-                    let service_name = pkt.service_name.clone();
-                    
                     app.add_event(pkt);
                     
-                    if let Some(node) = app.nodes.get_mut(&dest) {
-                        if node.process_name.is_none() {
-                            node.process_name = process_name;
-                        }
-                        if node.service_name.is_none() {
-                            node.service_name = service_name;
-                        }
-                    }
+                    // Note: Process mapping will be handled by UI thread periodically or by helper
+                    // For now, let's keep it in UI thread but we could move it to helper.
                     
-                    if is_new && !crate::network::utils::is_local_ip(&dest) {
-                        traceroute.trace(dest);
+                    if is_new && !traceflow::network::utils::is_local_ip(&dest) {
+                        let _ = cmd_tx.send(HelperCommand::Trace(dest));
                     }
                 }
-                app::AppEvent::TracerouteUpdate(target, path) => {
+                AppEvent::TracerouteUpdate(target, path) => {
                     app.update_path(target, path);
                 }
-                app::AppEvent::SwitchInterface(name) => {
+                AppEvent::SwitchInterface(name) => {
                     app.active_interface = name;
                     app.clear_state();
                 }
-                app::AppEvent::LanDeviceFound(device) => {
+                AppEvent::LanDeviceFound(device) => {
                     app.add_lan_device(device);
                 }
             }
@@ -182,7 +181,7 @@ fn run_app_with_events(
             }
         }
 
-        terminal.draw(|f| crate::ui::draw_ui(f, &mut app))?;
+        terminal.draw(|f| traceflow::ui::draw_ui(f, &mut app))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -190,21 +189,28 @@ fn run_app_with_events(
 
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Global hotkeys
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+                    let filename = format!("traceflow_{}.pcap", Instant::now().elapsed().as_secs());
+                    let _ = cmd_tx.send(HelperCommand::SavePcap(filename));
+                    continue;
+                }
+
                 match app.input_mode {
-                    app::InputMode::Normal => match key.code {
+                    InputMode::Normal => match key.code {
                         KeyCode::Char('q') => app.quit(),
-                        KeyCode::Char('i') => app.input_mode = app::InputMode::InterfaceSelection,
+                        KeyCode::Char('i') => app.input_mode = InputMode::InterfaceSelection,
                         KeyCode::Char('c') => app.clear_state(),
                         KeyCode::Char('p') => app.toggle_pause(),
                         KeyCode::Char('l') => app.toggle_view(),
-                        KeyCode::Char('/') => app.input_mode = app::InputMode::Filter,
+                        KeyCode::Char('/') => app.input_mode = InputMode::Filter,
                         KeyCode::Down => app.next_traffic_item(),
                         KeyCode::Up => app.previous_traffic_item(),
-                        KeyCode::Enter => app.input_mode = app::InputMode::Inspection,
+                        KeyCode::Enter => app.input_mode = InputMode::Inspection,
                         _ => {}
                     },
-                    app::InputMode::InterfaceSelection => match key.code {
-                        KeyCode::Esc => app.input_mode = app::InputMode::Normal,
+                    InputMode::InterfaceSelection => match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::Normal,
                         KeyCode::Up => {
                             if app.selected_interface_index > 0 {
                                 app.selected_interface_index -= 1;
@@ -218,29 +224,29 @@ fn run_app_with_events(
                         KeyCode::Enter => {
                             if let Some(name) = app.available_interfaces.get(app.selected_interface_index) {
                                 let name = name.clone();
-                                sniffer.switch_interface(name.clone());
+                                let _ = cmd_tx.send(HelperCommand::SwitchInterface(name.clone()));
                                 app.active_interface = format!("Switching to {}...", name);
                                 app.clear_state();
-                                app.input_mode = app::InputMode::Normal;
+                                app.input_mode = InputMode::Normal;
                             }
                         }
                         _ => {}
                     },
-                    app::InputMode::Inspection => match key.code {
+                    InputMode::Inspection => match key.code {
                         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-                            app.input_mode = app::InputMode::Normal;
+                            app.input_mode = InputMode::Normal;
                         }
                         _ => {}
                     },
-                    app::InputMode::Filter => match key.code {
+                    InputMode::Filter => match key.code {
                         KeyCode::Enter => {
                             app.active_filter = if app.filter_text.is_empty() { String::from("None") } else { app.filter_text.clone() };
-                            sniffer.update_filter(app.filter_text.clone());
-                            app.input_mode = app::InputMode::Normal;
+                            let _ = cmd_tx.send(HelperCommand::UpdateFilter(app.filter_text.clone()));
+                            app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Esc => {
                             app.filter_text.clear();
-                            app.input_mode = app::InputMode::Normal;
+                            app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Char(c) => app.filter_text.push(c),
                         KeyCode::Backspace => { app.filter_text.pop(); }

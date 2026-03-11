@@ -1,6 +1,8 @@
 use pnet::datalink::{self, Channel, NetworkInterface};
-use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, MutableArpPacket};
-use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
+use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, MutableArpPacket, ArpPacket};
+use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket, EthernetPacket};
+use pnet::packet::ipv6::Ipv6Packet;
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::{Packet, MutablePacket};
 use pnet::util::MacAddr;
 use std::net::{IpAddr, Ipv4Addr};
@@ -24,7 +26,7 @@ impl LanScanner {
                 if let Some(iface) = find_default_interface() {
                     scan_subnet(&iface, &event_tx_clone);
                 }
-                thread::sleep(Duration::from_secs(30)); // Rescan every 30s
+                thread::sleep(Duration::from_secs(30));
             }
         });
 
@@ -66,58 +68,81 @@ fn scan_subnet(interface: &NetworkInterface, event_tx: &Sender<AppEvent>) {
         _ => return,
     };
 
-    // Receiver thread
+    // Receiver thread for both ARP and NDP
     let event_tx_inner = event_tx.clone();
     thread::spawn(move || {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
             if let Ok(frame) = rx.next() {
-                if let Some(ethernet) = pnet::packet::ethernet::EthernetPacket::new(frame) {
-                    if ethernet.get_ethertype() == EtherTypes::Arp {
-                        if let Some(arp) = pnet::packet::arp::ArpPacket::new(ethernet.payload()) {
-                            if arp.get_operation() == ArpOperations::Reply {
-                                let mac = arp.get_sender_hw_addr().to_string();
-                                let vendor = crate::network::oui::lookup_vendor(&mac);
-                                
-                                let _ = event_tx_inner.send(AppEvent::LanDeviceFound(LanDevice {
-                                    ip: IpAddr::V4(arp.get_sender_proto_addr()),
-                                    mac,
-                                    vendor,
-                                    _hostname: None,
-                                    _last_seen: Instant::now(),
-                                }));
+                if let Some(eth) = EthernetPacket::new(frame) {
+                    match eth.get_ethertype() {
+                        EtherTypes::Arp => {
+                            if let Some(arp) = ArpPacket::new(eth.payload()) {
+                                if arp.get_operation() == ArpOperations::Reply {
+                                    let mac = arp.get_sender_hw_addr().to_string();
+                                    let _ = event_tx_inner.send(AppEvent::LanDeviceFound(LanDevice {
+                                        ip: IpAddr::V4(arp.get_sender_proto_addr()),
+                                        mac: mac.clone(),
+                                        vendor: crate::network::oui::lookup_vendor(&mac),
+                                    }));
+                                }
                             }
                         }
+                        EtherTypes::Ipv6 => {
+                            if let Some(ipv6) = Ipv6Packet::new(eth.payload()) {
+                                if ipv6.get_next_header() == IpNextHeaderProtocols::Icmpv6 {
+                                    let mac = eth.get_source().to_string();
+                                    let _ = event_tx_inner.send(AppEvent::LanDeviceFound(LanDevice {
+                                        ip: IpAddr::V6(ipv6.get_source()),
+                                        mac: mac.clone(),
+                                        vendor: crate::network::oui::lookup_vendor(&mac),
+                                    }));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
     });
 
-    // Sender loop
+    // 1. Send ARP requests
     for target_ip in ipv4_net.iter() {
-        let mut ethernet_buffer = [0u8; 42];
-        let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+        let mut buffer = [0u8; 42];
+        if let Some(mut eth) = MutableEthernetPacket::new(&mut buffer) {
+            eth.set_destination(MacAddr::broadcast());
+            eth.set_source(source_mac);
+            eth.set_ethertype(EtherTypes::Arp);
 
-        ethernet_packet.set_destination(MacAddr::broadcast());
-        ethernet_packet.set_source(source_mac);
-        ethernet_packet.set_ethertype(EtherTypes::Arp);
+            let mut arp_buffer = [0u8; 28];
+            if let Some(mut arp) = MutableArpPacket::new(&mut arp_buffer) {
+                arp.set_hardware_type(ArpHardwareTypes::Ethernet);
+                arp.set_protocol_type(EtherTypes::Ipv4);
+                arp.set_hw_addr_len(6);
+                arp.set_proto_addr_len(4);
+                arp.set_operation(ArpOperations::Request);
+                arp.set_sender_hw_addr(source_mac);
+                arp.set_sender_proto_addr(source_ip);
+                arp.set_target_hw_addr(MacAddr::zero());
+                arp.set_target_proto_addr(target_ip);
+                eth.set_payload(arp.packet_mut());
+            }
+            let _ = tx.send_to(eth.packet(), None);
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 
-        let mut arp_buffer = [0u8; 28];
-        let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
-
-        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp_packet.set_protocol_type(EtherTypes::Ipv4);
-        arp_packet.set_hw_addr_len(6);
-        arp_packet.set_proto_addr_len(4);
-        arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(source_mac);
-        arp_packet.set_sender_proto_addr(source_ip);
-        arp_packet.set_target_hw_addr(MacAddr::zero());
-        arp_packet.set_target_proto_addr(target_ip);
-
-        ethernet_packet.set_payload(arp_packet.packet_mut());
-        let _ = tx.send_to(ethernet_packet.packet(), None);
-        thread::sleep(Duration::from_millis(5));
+    // 2. Send one Neighbor Solicitation to all-nodes (IPv6)
+    let mut v6_buffer = [0u8; 64];
+    if let Some(mut eth_v6) = MutableEthernetPacket::new(&mut v6_buffer) {
+        eth_v6.set_destination(MacAddr(0x33, 0x33, 0x00, 0x00, 0x00, 0x01));
+        eth_v6.set_source(source_mac);
+        eth_v6.set_ethertype(EtherTypes::Ipv6);
+        
+        let mut icmp_v6 = [0u8; 8];
+        icmp_v6[0] = 135; // Neighbor Solicitation type
+        eth_v6.set_payload(&icmp_v6);
+        let _ = tx.send_to(eth_v6.packet(), None);
     }
 }

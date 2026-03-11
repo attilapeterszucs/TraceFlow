@@ -138,7 +138,7 @@ fn draw_throughput_sparkline(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
     let text = match app.input_mode {
-        InputMode::Normal => " [Q] Quit | [I] Iface | [L] Map/LAN | [/] Filter | [P] Pause | [C] Clear | [↑/↓] Nav | [Enter] Inspect ",
+        InputMode::Normal => " [Q] Quit | [I] Iface | [L] Map/LAN | [/] Filter | [P] Pause | [C] Clear | [Ctrl+S] Pcap | [↑/↓] Nav | [Enter] Inspect ",
         InputMode::Filter => " TYPE FILTER (e.g. 'tcp', 'port 443', 'host 1.1.1.1') | [Enter] Apply | [Esc] Cancel ",
         _ => " [Esc] Back ",
     };

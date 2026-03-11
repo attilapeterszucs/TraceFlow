@@ -20,6 +20,16 @@ clap = { version = "4.5", features = ["derive"] }
 tls-parser = "0.11"
 procfs = "0.16"
 ipnetwork = "0.20"
+pcap = "2.0"
+notify = "6.1"
+
+[[bin]]
+name = "traceflow"
+path = "src/main.rs"
+
+[[bin]]
+name = "traceflow-helper"
+path = "src/bin/traceflow-helper.rs"
 
 [profile.release]
 opt-level = 3
