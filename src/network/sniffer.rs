@@ -4,56 +4,118 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpPacket;
-use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, Receiver, unbounded};
 use std::net::IpAddr;
+use std::thread;
 use tls_parser::{parse_tls_plaintext, TlsMessage, TlsMessageHandshake, TlsExtension, SNIType};
 
 use crate::app::PacketEvent;
-use crate::ui::sanitize::sanitize_payload;
 
-pub fn start_sniffing(tx: Sender<PacketEvent>, interface_name: &str, ready_tx: Sender<String>) {
-    let interfaces = datalink::interfaces();
-    
-    let interface = interfaces.into_iter()
-        .find(|iface| iface.name == interface_name)
-        .or_else(|| {
-            datalink::interfaces().into_iter()
-                .find(|e| e.is_up() && !e.is_loopback() && (e.name.starts_with('e') || e.name.starts_with('w')))
-        })
-        .unwrap_or_else(|| {
-            panic!("Interface '{}' not found. Available: {:?}", 
-                   interface_name, 
-                   datalink::interfaces().into_iter().map(|i| i.name).collect::<Vec<_>>());
+pub struct SnifferManager {
+    command_tx: Sender<SnifferCommand>,
+}
+
+pub enum SnifferCommand {
+    SwitchInterface(String),
+}
+
+impl SnifferManager {
+    pub fn new(event_tx: Sender<crate::app::AppEvent>, initial_interface: String, ready_tx: Sender<String>) -> Self {
+        let (command_tx, command_rx) = unbounded();
+        
+        thread::spawn(move || {
+            sniffer_worker(command_rx, event_tx, initial_interface, ready_tx);
         });
 
-    let actual_iface_name = interface.name.clone();
+        Self { command_tx }
+    }
 
-    let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
-        Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => panic!("Unhandled channel type. Please use a standard Ethernet/WiFi interface."),
-        Err(e) => panic!("An error occurred when creating the datalink channel: {}", e),
-    };
+    pub fn switch_interface(&self, name: String) {
+        let _ = self.command_tx.send(SnifferCommand::SwitchInterface(name));
+    }
+}
 
-    let _ = ready_tx.send(actual_iface_name);
+fn sniffer_worker(
+    command_rx: Receiver<SnifferCommand>,
+    event_tx: Sender<crate::app::AppEvent>,
+    mut current_interface: String,
+    ready_tx: Sender<String>,
+) {
+    let mut current_channel_rx = None;
+    let mut first_run = true;
 
     loop {
-        match rx.next() {
-            Ok(packet) => {
-                if let Some(ethernet) = EthernetPacket::new(packet) {
-                    handle_ethernet_packet(&ethernet, &tx);
+        // 1. Check for commands (switch interface) or wait if we don't have a channel
+        let timeout = if current_channel_rx.is_none() {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_millis(0)
+        };
+
+        if let Ok(cmd) = command_rx.recv_timeout(timeout) {
+            match cmd {
+                SnifferCommand::SwitchInterface(name) => {
+                    current_interface = name;
+                    current_channel_rx = None; // Reset to force rebuild
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                eprintln!("Sniffer error: {}", e);
+        }
+
+        // 2. Setup channel if needed
+        if current_channel_rx.is_none() {
+            let interfaces = datalink::interfaces();
+            let interface = interfaces.into_iter()
+                .find(|iface| iface.name == current_interface)
+                .or_else(|| {
+                    datalink::interfaces().into_iter()
+                        .find(|e| e.is_up() && !e.is_loopback() && (e.name.starts_with('e') || e.name.starts_with('w')))
+                });
+
+            if let Some(iface) = interface {
+                let actual_name = iface.name.clone();
+                let mut config = datalink::Config::default();
+                config.read_timeout = Some(std::time::Duration::from_millis(100));
+                
+                match datalink::channel(&iface, config) {
+                    Ok(Channel::Ethernet(_, rx)) => {
+                        current_channel_rx = Some(rx);
+                        if first_run {
+                            let _ = ready_tx.send(actual_name);
+                            first_run = false;
+                        } else {
+                            let _ = event_tx.send(crate::app::AppEvent::SwitchInterface(actual_name));
+                        }
+                    }
+                    _ => {
+                        eprintln!("Failed to open channel on {}", actual_name);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        }
+
+        // 3. Sniff packet
+        if let Some(ref mut rx) = current_channel_rx {
+            match rx.next() {
+                Ok(packet) => {
+                    if let Some(ethernet) = EthernetPacket::new(packet) {
+                        handle_ethernet_packet(&ethernet, &event_tx);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                Err(e) => {
+                    eprintln!("Sniffer error: {}. Attempting to recover...", e);
+                    current_channel_rx = None;
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
         }
     }
 }
 
-fn handle_ethernet_packet(ethernet: &EthernetPacket, tx: &Sender<PacketEvent>) {
+fn handle_ethernet_packet(ethernet: &EthernetPacket, tx: &Sender<crate::app::AppEvent>) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
             if let Some(header) = Ipv4Packet::new(ethernet.payload()) {
@@ -69,7 +131,7 @@ fn handle_ethernet_packet(ethernet: &EthernetPacket, tx: &Sender<PacketEvent>) {
     }
 }
 
-fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<PacketEvent>) {
+fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<crate::app::AppEvent>) {
     let source = IpAddr::V4(header.get_source());
     let dest = IpAddr::V4(header.get_destination());
     let payload = header.payload();
@@ -83,7 +145,7 @@ fn handle_ipv4_packet(header: &Ipv4Packet, tx: &Sender<PacketEvent>) {
     );
 }
 
-fn handle_ipv6_packet(header: &Ipv6Packet, tx: &Sender<PacketEvent>) {
+fn handle_ipv6_packet(header: &Ipv6Packet, tx: &Sender<crate::app::AppEvent>) {
     let source = IpAddr::V6(header.get_source());
     let dest = IpAddr::V6(header.get_destination());
     let payload = header.payload();
@@ -102,11 +164,10 @@ fn process_transport_layer(
     source: IpAddr,
     dest: IpAddr,
     payload: &[u8],
-    tx: &Sender<PacketEvent>,
+    tx: &Sender<crate::app::AppEvent>,
 ) {
     let mut sni = None;
     let mut proto_str = "Other";
-    let mut sanitized = String::new();
 
     match protocol {
         IpNextHeaderProtocols::Tcp => {
@@ -116,26 +177,14 @@ fn process_transport_layer(
                 if tcp.get_destination() == 443 || tcp.get_source() == 443 {
                     sni = extract_sni(tcp_payload);
                 }
-                sanitized = sanitize_payload(tcp_payload);
             }
         }
         IpNextHeaderProtocols::Udp => {
             proto_str = "UDP";
-            if let Some(udp) = UdpPacket::new(payload) {
-                sanitized = sanitize_payload(udp.payload());
-            }
         }
-        IpNextHeaderProtocols::Icmp => {
-            proto_str = "ICMP";
-            sanitized = sanitize_payload(payload);
-        }
-        IpNextHeaderProtocols::Icmpv6 => {
-            proto_str = "ICMPv6";
-            sanitized = sanitize_payload(payload);
-        }
-        _ => {
-            sanitized = sanitize_payload(payload);
-        }
+        IpNextHeaderProtocols::Icmp => proto_str = "ICMP",
+        IpNextHeaderProtocols::Icmpv6 => proto_str = "ICMPv6",
+        _ => {}
     };
 
     let event = PacketEvent {
@@ -143,11 +192,10 @@ fn process_transport_layer(
         dest,
         protocol: proto_str.to_string(),
         bytes: payload.len(),
-        sanitized_payload: if sanitized.is_empty() { None } else { Some(sanitized) },
         sni,
     };
 
-    let _ = tx.send(event);
+    let _ = tx.send(crate::app::AppEvent::Packet(event));
 }
 
 fn extract_sni(payload: &[u8]) -> Option<String> {

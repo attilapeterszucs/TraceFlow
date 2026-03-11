@@ -7,6 +7,7 @@ use crate::config;
 pub enum AppEvent {
     Packet(PacketEvent),
     TracerouteUpdate(IpAddr, Vec<IpAddr>), // Target, Path
+    SwitchInterface(String),
 }
 
 #[derive(Debug, Clone)]
@@ -15,7 +16,6 @@ pub struct PacketEvent {
     pub dest: IpAddr,
     pub protocol: String,
     pub bytes: usize,
-    pub sanitized_payload: Option<String>,
     pub sni: Option<String>,
 }
 
@@ -32,14 +32,22 @@ pub struct Node {
     pub path: Vec<IpAddr>,
 }
 
+#[derive(PartialEq)]
+pub enum InputMode {
+    Normal,
+    InterfaceSelection,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub nodes: HashMap<IpAddr, Node>,
     pub events: VecDeque<PacketEvent>,
-    pub local_ip: Option<IpAddr>,
     pub active_interface: String,
     pub total_packets: u64,
     pub pulse_frame: u32,
+    pub input_mode: InputMode,
+    pub available_interfaces: Vec<String>,
+    pub selected_interface_index: usize,
 }
 
 impl App {
@@ -48,10 +56,12 @@ impl App {
             should_quit: false,
             nodes: HashMap::new(),
             events: VecDeque::with_capacity(config::MAX_HISTORY_EVENTS),
-            local_ip: None,
             active_interface: String::from("Detecting..."),
             total_packets: 0,
             pulse_frame: 0,
+            input_mode: InputMode::Normal,
+            available_interfaces: Vec::new(),
+            selected_interface_index: 0,
         }
     }
 
@@ -105,5 +115,11 @@ impl App {
 
     pub fn quit(&mut self) {
         self.should_quit = true;
+    }
+
+    pub fn clear_state(&mut self) {
+        self.nodes.clear();
+        self.events.clear();
+        self.total_packets = 0;
     }
 }

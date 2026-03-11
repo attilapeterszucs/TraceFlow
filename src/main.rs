@@ -5,24 +5,9 @@ mod network;
 mod geo;
 
 use std::error::Error;
-use std::thread;
 use crossbeam_channel::{unbounded, Receiver};
-use nix::unistd::{setgid, setuid, Uid, User};
 use clap::Parser;
 use pnet::datalink;
-
-fn drop_privileges() -> Result<(), Box<dyn Error>> {
-    let current_uid = Uid::current();
-    if current_uid.is_root() {
-        let nobody = User::from_name(config::FALLBACK_USER)?
-            .ok_or("Could not find fallback user")?;
-        
-        setgid(nobody.gid)?;
-        setuid(nobody.uid)?;
-        println!("Privileges dropped successfully.");
-    }
-    Ok(())
-}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -49,63 +34,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let selected_interface = match args.interface {
-        Some(name) => name,
-        None => {
-            let interfaces = datalink::interfaces();
-            let auto = interfaces.into_iter()
-                .find(|e| e.is_up() && !e.is_loopback() && (e.name.starts_with('e') || e.name.starts_with('w')))
-                .map(|e| e.name);
-            
-            match auto {
-                Some(name) => {
-                    eprintln!("Auto-detected interface: {}. Use -i <iface> to specify manually.", name);
-                    name
-                }
-                None => {
-                    eprintln!("Error: No interface specified and could not auto-detect. Use -l to list interfaces.");
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
+    let initial_interface = args.interface.unwrap_or_else(|| config::DEFAULT_INTERFACE.to_string());
 
     // Main event channel
     let (event_tx, event_rx) = unbounded::<app::AppEvent>();
     // Handshake channel for sniffer
     let (ready_tx, ready_rx) = unbounded::<String>();
 
-    // Start sniffer
-    let sniffer_tx = event_tx.clone();
-    let thread_iface = selected_interface.clone();
-    thread::spawn(move || {
-        let (pkt_tx, pkt_rx) = unbounded::<app::PacketEvent>();
-        let sniffer_event_tx = sniffer_tx.clone();
-        
-        thread::spawn(move || {
-            while let Ok(pkt) = pkt_rx.recv() {
-                let _ = sniffer_event_tx.send(app::AppEvent::Packet(pkt));
-            }
-        });
-
-        network::sniffer::start_sniffing(pkt_tx, &thread_iface, ready_tx);
-    });
+    // Start Sniffer Manager
+    let sniffer_manager = crate::network::sniffer::SnifferManager::new(
+        event_tx.clone(),
+        initial_interface,
+        ready_tx
+    );
 
     let detected_iface = ready_rx.recv().unwrap_or_else(|_| String::from("Unknown"));
 
     // Start Traceroute Manager
     let traceroute_manager = crate::network::traceroute::TracerouteManager::new(event_tx.clone());
 
-    let _ = drop_privileges();
-
     let mut app = app::App::new();
     app.active_interface = detected_iface;
+    app.available_interfaces = datalink::interfaces().into_iter()
+        .filter(|iface| iface.is_up() && !iface.is_loopback())
+        .map(|iface| iface.name)
+        .collect();
 
     let dns_resolver = crate::geo::resolver::DnsResolver::new();
     let geo_resolver = crate::geo::GeoResolver::new();
 
     // TUI main loop
-    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager) {
+    if let Err(e) = run_app_with_events(app, event_rx, dns_resolver, geo_resolver, traceroute_manager, sniffer_manager) {
         eprintln!("TUI error: {}", e);
     }
 
@@ -118,6 +77,7 @@ fn run_app_with_events(
     dns: crate::geo::resolver::DnsResolver,
     geo: crate::geo::GeoResolver,
     traceroute: crate::network::traceroute::TracerouteManager,
+    sniffer: crate::network::sniffer::SnifferManager,
 ) -> std::io::Result<()> {
     use ratatui::{backend::CrosstermBackend, Terminal};
     use crossterm::{
@@ -152,6 +112,10 @@ fn run_app_with_events(
                 app::AppEvent::TracerouteUpdate(target, path) => {
                     app.update_path(target, path);
                 }
+                app::AppEvent::SwitchInterface(name) => {
+                    app.active_interface = name;
+                    app.clear_state();
+                }
             }
         }
 
@@ -181,8 +145,36 @@ fn run_app_with_events(
 
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                if let KeyCode::Char('q') = key.code {
-                    app.quit();
+                match app.input_mode {
+                    app::InputMode::Normal => match key.code {
+                        KeyCode::Char('q') => app.quit(),
+                        KeyCode::Char('i') => app.input_mode = app::InputMode::InterfaceSelection,
+                        KeyCode::Char('c') => app.clear_state(),
+                        _ => {}
+                    },
+                    app::InputMode::InterfaceSelection => match key.code {
+                        KeyCode::Esc => app.input_mode = app::InputMode::Normal,
+                        KeyCode::Up => {
+                            if app.selected_interface_index > 0 {
+                                app.selected_interface_index -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            if app.selected_interface_index < app.available_interfaces.len().saturating_sub(1) {
+                                app.selected_interface_index += 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(name) = app.available_interfaces.get(app.selected_interface_index) {
+                                let name = name.clone();
+                                sniffer.switch_interface(name.clone());
+                                app.active_interface = format!("Switching to {}...", name);
+                                app.clear_state();
+                                app.input_mode = app::InputMode::Normal;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
