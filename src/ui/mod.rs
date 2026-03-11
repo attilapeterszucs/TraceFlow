@@ -59,9 +59,18 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
             .and_then(|n| n.sni.clone().or_else(|| n.hostname.clone()))
             .unwrap_or_else(|| e.dest.to_string());
         
-        let content = format!("{:<15} -> {:<20} [{}] {}b", e.source, target_name, e.protocol, e.bytes);
-        let color = get_protocol_color(&e.protocol);
-        ListItem::new(content).style(Style::default().fg(color))
+        let mut content = format!("{:<15} -> {:<20} [{}] {}b", e.source, target_name, e.protocol, e.bytes);
+        if e.is_flagged {
+            content.push_str(" [!] ");
+        }
+        
+        let color = if e.is_flagged { Color::LightRed } else { get_protocol_color(&e.protocol) };
+        let mut style = Style::default().fg(color);
+        if e.is_flagged {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        
+        ListItem::new(content).style(style)
     }).collect();
 
     let history_list = List::new(items)

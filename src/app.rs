@@ -36,6 +36,7 @@ pub struct PacketEvent {
     pub sni: Option<String>,
     pub raw_payload: Vec<u8>,
     pub direction: TrafficDirection,
+    pub is_flagged: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,7 @@ pub struct Node {
 pub struct LanDevice {
     pub ip: IpAddr,
     pub mac: String,
+    pub vendor: Option<String>,
     pub _hostname: Option<String>,
     pub _last_seen: Instant,
 }

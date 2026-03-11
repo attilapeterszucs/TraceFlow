@@ -18,7 +18,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         let devices: Vec<_> = app.lan_devices.values().collect();
         for (i, device) in devices.iter().enumerate() {
             let connector = if i == devices.len() - 1 { "    └── " } else { "    ├── " };
-            lan_text.push_str(&format!("{}{:<15} [{}]\n", connector, device.ip, device.mac));
+            let vendor = device.vendor.as_deref().unwrap_or("Unknown Vendor");
+            lan_text.push_str(&format!("{}{:<15} [{}] [{}]\n", connector, device.ip, device.mac, vendor));
         }
     }
 

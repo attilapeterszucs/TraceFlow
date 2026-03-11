@@ -283,6 +283,7 @@ fn process_transport_layer(
         sni,
         raw_payload,
         direction,
+        is_flagged: false,
     };
 
     if let Some(ref f) = filter {

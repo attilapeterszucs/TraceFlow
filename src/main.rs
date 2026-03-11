@@ -3,6 +3,7 @@ mod config;
 mod ui;
 mod network;
 mod geo;
+mod security;
 
 use std::error::Error;
 use crossbeam_channel::{unbounded, Receiver};
@@ -107,7 +108,10 @@ fn run_app_with_events(
         // Drain events
         while let Ok(event) = rx.try_recv() {
             match event {
-                app::AppEvent::Packet(pkt) => {
+                app::AppEvent::Packet(mut pkt) => {
+                    // Run security heuristics
+                    crate::security::SecurityHeuristics::scan(&mut pkt);
+
                     let dest = pkt.dest;
                     let is_new = !app.nodes.contains_key(&dest);
                     

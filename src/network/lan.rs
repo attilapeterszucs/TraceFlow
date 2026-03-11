@@ -76,9 +76,13 @@ fn scan_subnet(interface: &NetworkInterface, event_tx: &Sender<AppEvent>) {
                     if ethernet.get_ethertype() == EtherTypes::Arp {
                         if let Some(arp) = pnet::packet::arp::ArpPacket::new(ethernet.payload()) {
                             if arp.get_operation() == ArpOperations::Reply {
+                                let mac = arp.get_sender_hw_addr().to_string();
+                                let vendor = crate::network::oui::lookup_vendor(&mac);
+                                
                                 let _ = event_tx_inner.send(AppEvent::LanDeviceFound(LanDevice {
                                     ip: IpAddr::V4(arp.get_sender_proto_addr()),
-                                    mac: arp.get_sender_hw_addr().to_string(),
+                                    mac,
+                                    vendor,
                                     _hostname: None,
                                     _last_seen: Instant::now(),
                                 }));
